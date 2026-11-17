@@ -41,6 +41,31 @@ title, *Copy title*, *Show file* and an *uploaded* checkbox. Files are saved in 
 
 Optional: `AutoClipper --headless https://twitch.tv/x` runs without a window (UI still at http://127.0.0.1:8765).
 
+## YouTube upload + schedule
+
+Link your channel once, then upload straight from the **Clips** tab (button **▶ YouTube**): you write the
+title, description, tags, category, visibility, and either upload right away or pick a **date & time** to go live.
+Uploads run in the background; the **YouTube** tab shows the queue (progress, retry, cancel, open in Studio).
+Scheduled clips are uploaded immediately as *private* and YouTube itself publishes them at your chosen time,
+so the app does not need to be running at that moment. After a successful upload the clip is ticked "uploaded".
+
+**One-time setup (~10 min)** — Google makes every app use its own free OAuth client:
+1. https://console.cloud.google.com → create a project.
+2. *APIs & Services → Library* → enable **YouTube Data API v3**.
+3. *OAuth consent screen*: user type **External**, app name + your email, add your Google account under
+   **Test users**, then click **Publish app** (otherwise the login expires every 7 days).
+4. *Credentials → Create credentials → OAuth client ID* → type **Desktop app**.
+5. In AutoClipper → **YouTube** tab: paste Client ID + secret → **Save & connect YouTube** → log in.
+   Google shows "hasn't verified this app": click *Advanced → Go to … (unsafe)*. It's your own app.
+
+Good to know:
+- Google's changelog says uploads from unverified projects are no longer forced to private, but some older
+  docs still say so. Test with one clip; if it stays private after publish time, set it public in YouTube Studio
+  or request Google's API audit (form: support.google.com/youtube/contact/yt_api_form).
+- Default API allowance is about 100 uploads/day per project, and your channel has its own daily upload limit.
+- The app stores your Client ID/secret and login token only on your PC (`config.json`, `youtube_token.json` in the app data folder).
+- Uploads are marked "not made for kids". Check YouTube's reused-content/monetization rules for clips.
+
 ## Notes
 - Kick uses Kick's unofficial chat/API; if Kick changes it, Kick chat may need an update.
 - Subtitles run on your CPU/GPU; with `small`, a 40s clip takes roughly 20–60s on a normal PC.

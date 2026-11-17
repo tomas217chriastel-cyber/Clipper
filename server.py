@@ -1,6 +1,7 @@
 """AutoClipper app backend: settings, channel management, clip library, local HTTP API for the UI."""
 from __future__ import annotations
 
+import datetime
 import glob
 import http.server
 import json
@@ -11,9 +12,12 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
+import webbrowser
 from types import SimpleNamespace
 
 import autoclipper as ac
+import youtube
 
 PRESETS = {
     "low": dict(ratio=4.5, min_users=6, min_score=20, min_hype_share=0.35),     # fewer, bigger moments
@@ -22,12 +26,18 @@ PRESETS = {
 }
 DEFAULTS = dict(out="", format="vertical", subs=True, model="small", pre=30, post=12, sensitivity="medium",
                 cooldown=60, quality="720p60,720p,best", encoder="libx264", hype_words="", buffer=300,
-                window=8, baseline=120, sigma=3.0, hype_weight=2.0, poll=60)
+                window=8, baseline=120, sigma=3.0, hype_weight=2.0, poll=60,
+                yt_client_id="", yt_client_secret="", yt_description="", yt_tags="", yt_category="20", yt_privacy="private")
 LIMITS = dict(pre=(10, 90), post=(4, 45), cooldown=(15, 600), buffer=(120, 1800), window=(4, 20),
               baseline=(60, 600), sigma=(1, 8), hype_weight=(0, 6), poll=(15, 600))
 CHOICES = dict(format=("vertical", "horizontal"), sensitivity=tuple(PRESETS),
                model=("tiny", "base", "small", "medium"),
-               encoder=("libx264", "h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_amf"))
+               encoder=("libx264", "h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_amf"),
+               yt_privacy=("private", "unlisted", "public"),
+               yt_category=("1", "10", "17", "20", "22", "23", "24", "25"))
+MASK = "\u2022\u2022\u2022\u2022\u2022\u2022"
+OPEN_OK = ("https://studio.youtube.com/", "https://youtu.be/", "https://www.youtube.com/",
+           "https://console.cloud.google.com/", "https://accounts.google.com/")
 SAFE_NAME = re.compile(r"^[\w@.-]+$")
 
 
@@ -47,6 +57,11 @@ class Engine:
         self.cfg = SimpleNamespace()
         self._load()
         self.apply()
+        self.yt = youtube.YouTube(self.dir)
+        self.uploads = []
+        self.uploads_path = os.path.join(self.dir, "uploads.json")
+        self._load_uploads()
+        threading.Thread(target=self._upload_loop, daemon=True).start()
 
     # -- persistence
     def _load(self):
@@ -79,7 +94,7 @@ class Engine:
         with self.lock:
             old_model, old_subs = self.settings["model"], self.settings["subs"]
             for k, v in new.items():
-                if k not in DEFAULTS:
+                if k not in DEFAULTS or (k == "yt_client_secret" and str(v).startswith(MASK)):
                     continue
                 d = DEFAULTS[k]
                 if isinstance(d, bool):
@@ -159,7 +174,12 @@ class Engine:
                 item.update(w.snapshot() if w else dict(status="stopped", live=False, score=[], hype=[],
                                                         marks=[], msgs_min=0, clip_count=0))
                 chans.append(item)
-        return dict(channels=chans, settings=self.settings, out=self.cfg.out, model=ac.MODEL,
+        shown = dict(self.settings)
+        if shown["yt_client_secret"]:
+            shown["yt_client_secret"] = MASK
+        yt = dict(configured=bool(self.settings["yt_client_id"] and self.settings["yt_client_secret"]),
+                  connected=self.yt.connected())
+        return dict(channels=chans, settings=shown, youtube=yt, out=self.cfg.out, model=ac.MODEL,
                     ffmpeg=not ac.FFMPEG_NOTE, ffmpeg_note=ac.FFMPEG_NOTE)
 
     # -- clips
@@ -219,6 +239,140 @@ class Engine:
         else:
             subprocess.Popen(["xdg-open", self.cfg.out])
 
+    # -- YouTube upload queue
+    def _load_uploads(self):
+        try:
+            with open(self.uploads_path, encoding="utf8") as f:
+                self.uploads = json.load(f)
+        except (OSError, ValueError):
+            self.uploads = []
+        for u in self.uploads:  # interrupted by app restart -> try again
+            if u.get("status") == "uploading":
+                u["status"], u["progress"] = "queued", 0
+
+    def _save_uploads(self):
+        with self.lock:
+            with open(self.uploads_path, "w", encoding="utf8") as f:
+                json.dump(self.uploads, f, ensure_ascii=False)
+
+    def yt_connect(self, port):
+        s = self.settings
+        if not (s["yt_client_id"] and s["yt_client_secret"]):
+            raise ValueError("Save your Google Client ID and Client Secret first")
+        url = self.yt.auth_url(s["yt_client_id"], f"http://127.0.0.1:{port}/oauth/callback")
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        return url
+
+    def yt_finish(self, code, state):
+        self.yt.finish(code, state, self.settings["yt_client_id"], self.settings["yt_client_secret"])
+        ac.log("youtube", "account connected")
+
+    def enqueue_upload(self, d):
+        if not self.yt.connected():
+            raise ValueError("Connect your YouTube account first (YouTube tab)")
+        name = str(d.get("name", ""))
+        if not os.path.exists(self._clip_path(name, ".mp4")):
+            raise ValueError("Clip file not found")
+        title = str(d.get("title", "")).strip()
+        if not title or len(title) > 100:
+            raise ValueError("Title is required and must be at most 100 characters")
+        desc = str(d.get("description", ""))[:5000]
+        if d.get("shorts") and "#shorts" not in (title + desc).lower():
+            desc = (desc + "\n\n#Shorts").strip()
+        tags = [t.strip() for t in str(d.get("tags", "")).split(",") if t.strip()]
+        privacy = d.get("privacy", "private")
+        if privacy not in CHOICES["yt_privacy"]:
+            privacy = "private"
+        publish_at = d.get("publish_at") or None
+        if publish_at:
+            try:
+                when = datetime.datetime.fromisoformat(str(publish_at).replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError("Invalid schedule time")
+            if when.timestamp() < time.time() + 300:
+                raise ValueError("Scheduled time must be at least 5 minutes in the future")
+            publish_at = when.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        category = str(d.get("category") or self.settings["yt_category"])
+        with self.lock:
+            if any(u["name"] == name and u["status"] in ("queued", "uploading", "done") for u in self.uploads):
+                raise ValueError("This clip is already queued or uploaded")
+            self.uploads.append(dict(id=uuid.uuid4().hex[:8], name=name, title=title, description=desc, tags=tags,
+                                     privacy=privacy, publish_at=publish_at, category=category, status="queued",
+                                     progress=0, video_id="", error="", created=time.time()))
+        self._save_uploads()
+
+    def _upload_item(self, uid):
+        return next((u for u in self.uploads if u["id"] == uid), None)
+
+    def cancel_upload(self, uid):
+        with self.lock:
+            u = self._upload_item(uid)
+            if u and u["status"] == "queued":
+                u["status"] = "cancelled"
+            elif u and u["status"] == "uploading":
+                u["cancel"] = True
+        self._save_uploads()
+
+    def retry_upload(self, uid):
+        with self.lock:
+            u = self._upload_item(uid)
+            if u and u["status"] in ("error", "cancelled"):
+                u.update(status="queued", error="", progress=0)
+                u.pop("cancel", None)
+        self._save_uploads()
+
+    def remove_upload(self, uid):
+        with self.lock:
+            self.uploads = [u for u in self.uploads if u["id"] != uid or u["status"] == "uploading"]
+        self._save_uploads()
+
+    def list_uploads(self):
+        with self.lock:
+            return [{k: v for k, v in u.items() if k != "cancel"} for u in reversed(self.uploads)]
+
+    def open_url(self, url):
+        if not url.startswith(OPEN_OK):
+            raise ValueError("URL not allowed")
+        webbrowser.open(url)
+
+    def _upload_loop(self):
+        while True:
+            time.sleep(2)
+            with self.lock:
+                item = next((u for u in self.uploads if u["status"] == "queued"), None)
+                if item:
+                    item["status"], item["progress"] = "uploading", 0
+            if not item:
+                continue
+            try:
+                path = self._clip_path(item["name"], ".mp4")
+                snippet = dict(title=item["title"], description=item["description"], categoryId=item["category"])
+                if item["tags"]:
+                    snippet["tags"] = item["tags"]
+                status = dict(privacyStatus=item["privacy"], selfDeclaredMadeForKids=False)
+                if item["publish_at"]:  # YouTube publishes it itself at that time (must be private until then)
+                    status.update(privacyStatus="private", publishAt=item["publish_at"])
+                ac.log("youtube", f"uploading {item['name']} ...")
+
+                def prog(p, it=item):
+                    it["progress"] = p
+
+                vid = self.yt.upload(self.settings["yt_client_id"], self.settings["yt_client_secret"], path,
+                                     snippet, status, prog, lambda it=item: it.get("cancel"))
+                item.update(status="done", video_id=vid, progress=100, error="")
+                try:
+                    self.mark_clip(item["name"], True)
+                except Exception:
+                    pass
+                ac.log("youtube", f"uploaded {item['name']} -> https://youtu.be/{vid}")
+            except Exception as e:
+                item.update(status="cancelled" if item.get("cancel") else "error", error=str(e))
+                ac.log("youtube", f"upload failed for {item['name']}: {e}")
+            self._save_uploads()
+
     def logs(self, since):
         lines = [(n, l) for n, l in list(ac.LOGS) if n > since]
         return dict(seq=lines[-1][0] if lines else since, lines=[l for _, l in lines])
@@ -269,6 +423,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(e.list_clips())
             elif p == "/api/logs":
                 self._json(e.logs(int(q.get("since", ["0"])[0])))
+            elif p == "/oauth/callback":
+                self.oauth_callback(q)
+            elif p == "/api/uploads":
+                self._json(e.list_uploads())
             elif p.startswith("/clips/"):
                 self.serve_clip(urllib.parse.unquote(p[7:]))
             else:
@@ -298,6 +456,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 e.mark_clip(d["name"], d["uploaded"])
             elif p == "/api/clips/delete":
                 e.delete_clip(d["name"])
+            elif p == "/api/youtube/connect":
+                return self._json(dict(ok=True, url=e.yt_connect(self.server.server_address[1])))
+            elif p == "/api/youtube/disconnect":
+                e.yt.disconnect()
+            elif p == "/api/uploads":
+                e.enqueue_upload(d)
+            elif p == "/api/uploads/cancel":
+                e.cancel_upload(d["id"])
+            elif p == "/api/uploads/retry":
+                e.retry_upload(d["id"])
+            elif p == "/api/uploads/remove":
+                e.remove_upload(d["id"])
+            elif p == "/api/open":
+                e.open_url(d["url"])
             elif p == "/api/reveal":
                 e.reveal(d.get("name"))
             elif p == "/api/quit":
@@ -308,10 +480,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 return self._json(dict(error="not found"), 404)
             self._json(dict(ok=True))
-        except (ValueError, KeyError) as ex:
+        except (ValueError, KeyError, youtube.YouTubeError) as ex:
             self._json(dict(error=str(ex)), 400)
         except Exception as ex:
             self._json(dict(error=str(ex)), 500)
+
+    def oauth_callback(self, q):
+        try:
+            if q.get("error"):
+                raise ValueError("Google said: " + q["error"][0])
+            self.engine.yt_finish(q["code"][0], q["state"][0])
+            msg, color = "YouTube connected \u2713 &mdash; you can close this tab and return to AutoClipper.", "#34d399"
+        except Exception as ex:
+            msg, color = "Could not connect: " + str(ex).replace("<", "&lt;"), "#ff5d6c"
+        page = ("<!doctype html><meta charset=utf-8><title>AutoClipper</title><body style=\"background:#0f1115;"
+                "color:#e8eaf0;font:18px system-ui;display:grid;place-items:center;height:100vh\"><div style=\"color:%s\">%s</div>"
+                % (color, msg))
+        self._send(200, page.encode(), "text/html; charset=utf-8")
 
     def serve_clip(self, fname):
         stem, ext = os.path.splitext(fname)

@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AutoClipper</title>
+<style>
+:root{--bg:#0f1115;--panel:#171a21;--panel2:#1d212a;--line:#272c38;--tx:#e8eaf0;--mut:#8b93a7;--acc:#8b5cf6;--acc2:#a78bfa;--hot:#ff5d6c;--ok:#34d399;--warn:#fbbf24}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:center;gap:18px;padding:12px 22px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+.brand{font-weight:700;font-size:17px;letter-spacing:.2px}.brand span{color:var(--acc2)}
+nav{display:flex;gap:4px;flex:1}nav button{background:none;border:0;color:var(--mut);padding:8px 14px;border-radius:8px;cursor:pointer;font:inherit}
+nav button.on{background:var(--panel2);color:var(--tx)}nav button:hover{color:var(--tx)}
+.badge{background:var(--acc);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;margin-left:4px}
+.right{display:flex;gap:8px;align-items:center}
+button.ghost,button.pri,button.danger{border-radius:8px;padding:7px 12px;font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--tx)}
+button.pri{background:var(--acc);border-color:var(--acc)}button.pri:hover{background:#7c4be8}button.ghost:hover{border-color:#3a4152}
+button.danger{color:var(--hot)}button.small{padding:4px 9px;font-size:12px}
+main{max-width:1120px;margin:0 auto;padding:22px}
+.pill{font-size:12px;padding:3px 9px;border-radius:20px;background:var(--panel2);color:var(--mut)}
+.pill.ok{color:var(--ok)}.pill.warn{color:var(--warn)}
+.addrow{display:flex;gap:8px;margin-bottom:18px}
+input[type=text],input[type=number],select{background:var(--panel);border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:9px 11px;font:inherit;width:100%}
+input:focus,select:focus{outline:1px solid var(--acc)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+.row{display:flex;align-items:center;gap:10px}.sp{flex:1}
+.name{font-weight:600;font-size:15px}.plat{font-size:11px;text-transform:uppercase;color:var(--mut);border:1px solid var(--line);border-radius:5px;padding:1px 6px}
+.st{font-size:12px;color:var(--mut)}.st.live{color:var(--ok)}.st.live:before{content:"● "}
+canvas{width:100%;height:120px;background:var(--panel2);border-radius:8px;margin-top:10px;display:block}
+.sw{position:relative;width:40px;height:22px;display:inline-block}.sw input{opacity:0;width:0;height:0}
+.sw i{position:absolute;inset:0;background:#2c3242;border-radius:22px;cursor:pointer;transition:.15s}
+.sw i:before{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.15s}
+.sw input:checked+i{background:var(--acc)}.sw input:checked+i:before{transform:translateX(18px)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.clip{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.clip.done{opacity:.55}.clip video{width:100%;max-height:420px;background:#000;display:block}
+.clip .b{padding:12px}.clip canvas{height:56px;margin:8px 0}
+.title{font-weight:600;margin-bottom:2px}.meta{color:var(--mut);font-size:12px}
+.chip{display:inline-block;background:var(--panel2);border-radius:20px;padding:1px 8px;font-size:11px;margin:4px 4px 0 0;color:var(--acc2)}
+.acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center}
+.acts label{font-size:12px;color:var(--mut);display:flex;gap:5px;align-items:center;cursor:pointer}
+.form{display:grid;grid-template-columns:1fr 1fr;gap:14px 20px}.form label{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}
+.form .full{grid-column:1/-1}.hint{font-size:12px;color:var(--mut);margin-top:3px}
+details{margin-top:16px}summary{cursor:pointer;color:var(--mut)}
+pre{background:#0b0d11;border:1px solid var(--line);border-radius:10px;padding:12px;height:62vh;overflow:auto;font:12px/1.5 ui-monospace,Consolas,monospace;color:#b9c0d4;white-space:pre-wrap}
+.empty{color:var(--mut);text-align:center;padding:50px 10px}
+#toast{position:fixed;right:20px;bottom:20px;background:var(--acc);color:#fff;padding:10px 16px;border-radius:10px;display:none;z-index:9}
+textarea{background:var(--panel);border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:9px 11px;font:inherit;width:100%;resize:vertical}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:20}.modal.on{display:flex}
+.mbox{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px;width:min(580px,94vw);max-height:92vh;overflow:auto}
+.mbox .f{margin-bottom:12px}.mbox label{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}ol.steps{margin:6px 0 0 18px;padding:0;color:var(--mut);font-size:13px}ol.steps li{margin:3px 0}
+</style></head><body>
+<header>
+  <div class="brand">✂ Auto<span>Clipper</span></div>
+  <nav>
+    <button data-tab="channels" class="on">Channels</button>
+    <button data-tab="clips">Clips<span id="cnt" class="badge" hidden></span></button>
+    <button data-tab="youtube">YouTube</button>
+    <button data-tab="settings">Settings</button>
+    <button data-tab="log">Log</button>
+  </nav>
+  <div class="right"><span id="sub" class="pill"></span>
+    <button class="ghost" id="open">📂 Clips folder</button><button class="ghost" id="quit">Quit</button></div>
+</header>
+<main>
+<section id="t-channels">
+  <div class="addrow"><input type="text" id="url" placeholder="Paste a Twitch, Kick or YouTube live link — e.g. https://twitch.tv/streamer">
+    <button class="pri" id="add">Add channel</button></div>
+  <div id="chans"></div>
+  <div class="empty" id="chempty" hidden>No channels yet. Paste a stream link above — AutoClipper will wait for it to go live and clip it automatically.<br>Keep this app open (you can minimise it).</div>
+</section>
+
+<section id="t-clips" hidden>
+  <div class="row" style="margin-bottom:14px"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="hideDone"> Hide clips marked as uploaded</label><span class="sp"></span><span class="meta" id="clipinfo"></span></div>
+  <div class="grid" id="clips"></div>
+  <div class="empty" id="cempty" hidden>No clips yet. They appear here as soon as chat spikes on a live channel.</div>
+</section>
+
+<section id="t-settings" hidden>
+  <div class="card"><div class="form">
+    <div><label>Sensitivity</label><select id="s_sensitivity"><option value="low">Low – only big moments</option><option value="medium">Medium (recommended)</option><option value="high">High – more clips</option></select>
+      <div class="hint">How big a chat spike has to be before a clip is made.</div></div>
+    <div><label>Format</label><select id="s_format"><option value="vertical">Vertical 9:16 (Shorts)</option><option value="horizontal">Horizontal 16:9</option></select></div>
+    <div><label>Seconds before spike: <b id="v_pre"></b></label><input type="range" id="s_pre" min="10" max="90" style="width:100%"></div>
+    <div><label>Seconds after spike: <b id="v_post"></b></label><input type="range" id="s_post" min="4" max="45" style="width:100%"></div>
+    <div><label>Subtitles</label><select id="s_subs"><option value="1">On (Whisper, runs on your PC)</option><option value="0">Off</option></select></div>
+    <div><label>Subtitle model</label><select id="s_model"><option>tiny</option><option>base</option><option>small</option><option>medium</option></select>
+      <div class="hint">Bigger = more accurate but slower. Models not bundled download once on first use.</div></div>
+  </div>
+  <details><summary>Advanced</summary><div class="form" style="margin-top:12px">
+    <div><label>Cooldown between clips (sec)</label><input type="number" id="s_cooldown"></div>
+    <div><label>Stream quality (fallback list)</label><input type="text" id="s_quality"></div>
+    <div><label>Video encoder</label><select id="s_encoder"><option>libx264</option><option value="h264_nvenc">h264_nvenc (NVIDIA)</option><option value="h264_videotoolbox">h264_videotoolbox (Mac)</option><option value="h264_qsv">h264_qsv (Intel)</option><option value="h264_amf">h264_amf (AMD)</option></select></div>
+    <div><label>Rolling buffer (sec)</label><input type="number" id="s_buffer"></div>
+    <div class="full"><label>Extra hype words (comma separated)</label><input type="text" id="s_hype_words" placeholder="sheesh, cooked, aura"></div>
+    <div class="full"><label>Save clips to</label><input type="text" id="s_out" placeholder="(default folder)"></div>
+  </div></details>
+  <div class="row" style="margin-top:18px"><button class="pri" id="save">Save settings</button><span class="meta" id="saved"></span></div></div>
+</section>
+
+<section id="t-youtube" hidden>
+  <div class="card"><div class="row"><b>YouTube account</b><span class="sp"></span><span id="ytstat" class="pill"></span></div>
+    <div class="hint" style="margin:8px 0 10px">One-time setup (about 10 minutes). Google requires you to create your own free “OAuth client”:
+      <ol class="steps"><li>Open the Google Cloud Console and create a project.</li>
+      <li>APIs &amp; Services → Library → enable <b>YouTube Data API v3</b>.</li>
+      <li>OAuth consent screen: type <b>External</b>, fill app name + your email, add your own Google account as a <b>test user</b>, then click <b>Publish app</b> (otherwise the login expires every 7 days).</li>
+      <li>Credentials → Create credentials → <b>OAuth client ID</b> → type <b>Desktop app</b>. Paste the Client ID and secret below.</li></ol></div>
+    <div class="form"><div><label>Client ID</label><input type="text" id="s_yt_client_id" autocomplete="off"></div>
+      <div><label>Client secret</label><input type="text" id="s_yt_client_secret" autocomplete="off"></div></div>
+    <div class="row" style="margin-top:12px"><button class="pri" id="ytconnect">Save &amp; connect YouTube</button>
+      <button class="ghost" id="ytdisc">Disconnect</button><button class="ghost small" id="ytconsole">Open Google Cloud Console</button></div></div>
+  <div class="card"><b>Upload defaults</b><div class="form" style="margin-top:10px">
+    <div class="full"><label>Default description</label><textarea id="s_yt_description" rows="4" placeholder="Links, credits, socials… (you can still edit it for each clip)"></textarea></div>
+    <div><label>Default tags (comma separated)</label><input type="text" id="s_yt_tags"></div>
+    <div><label>Category</label><select id="s_yt_category"></select></div>
+    <div><label>Visibility</label><select id="s_yt_privacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select></div></div>
+    <div class="row" style="margin-top:12px"><button class="pri" id="ytdef">Save defaults</button></div></div>
+  <div class="card"><b>Upload queue &amp; schedule</b>
+    <div class="hint">In the Clips tab press “▶ YouTube” on a clip, write the title/description, choose when it goes live, and it uploads automatically in the background.</div>
+    <div id="uq"></div><div class="empty" id="uqempty" hidden>Nothing queued yet.</div></div>
+</section>
+
+<section id="t-log" hidden><pre id="logbox"></pre></section>
+</main>
+<div class="modal" id="upm"><div class="mbox"><h3 style="margin:0 0 14px">Upload to YouTube</h3>
+  <div class="f"><label>Title (max 100)</label><input type="text" id="u_title" maxlength="100"></div>
+  <div class="f"><label>Description</label><textarea id="u_desc" rows="5"></textarea></div>
+  <div class="f"><label>Tags (comma separated)</label><input type="text" id="u_tags"></div>
+  <div class="form f"><div><label>Visibility</label><select id="u_privacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select></div>
+    <div><label>Category</label><select id="u_category"></select></div></div>
+  <div class="f"><label>Publish</label><select id="u_when"><option value="now">As soon as it is uploaded</option><option value="sched">Schedule for a date &amp; time…</option></select>
+    <input type="datetime-local" id="u_at" hidden style="margin-top:8px"><div class="hint" id="u_hint"></div></div>
+  <label class="row" style="cursor:pointer;color:var(--tx);font-size:13px"><input type="checkbox" id="u_shorts"> Add #Shorts (for vertical clips under 60 seconds)</label>
+  <div class="row" style="margin-top:16px"><button class="pri" id="u_go">Add to upload queue</button><button class="ghost" id="u_x">Cancel</button></div></div></div>
+<div id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+async function api(p,body){const r=await fetch('/api/'+p,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.statusText);return j}
+function toast(t){const e=$('#toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',3200)}
+let tab='channels';
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;
+  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));
+  ['channels','clips','youtube','settings','log'].forEach(t=>$('#t-'+t).hidden=t!==tab);if(tab==='clips')loadClips();if(tab==='settings')fillSettings();if(tab==='youtube')ytFill()});
+
+function draw(cv,score,hype,o={}){const dpr=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;cv.width=w*dpr;cv.height=h*dpr;
+  const g=cv.getContext('2d');g.scale(dpr,dpr);const n=score.length;if(n<2)return;const mx=Math.max(8,...score);
+  if(o.band){g.fillStyle='rgba(139,92,246,.16)';g.fillRect(o.band[0]/(n-1)*w,0,(o.band[1]-o.band[0])/(n-1)*w,h)}
+  const line=(a,c,fill)=>{g.beginPath();a.forEach((v,i)=>{const x=i/(n-1)*w,y=h-3-v/mx*(h-8);i?g.lineTo(x,y):g.moveTo(x,y)});
+    if(fill){g.lineTo(w,h);g.lineTo(0,h);g.closePath();g.fillStyle=fill;g.fill()}g.strokeStyle=c;g.lineWidth=1.6;g.stroke()};
+  line(score,'#a78bfa','rgba(139,92,246,.18)');line(hype,'#fbbf24');
+  (o.marks||[]).forEach(i=>{const x=i/(n-1)*w;g.strokeStyle='#ff5d6c';g.setLineDash([4,3]);g.beginPath();g.moveTo(x,0);g.lineTo(x,h);g.stroke();g.setLineDash([])})}
+
+/* channels */
+async function refresh(){let s;try{s=await api('state')}catch(e){return}
+  $('#chempty').hidden=s.channels.length>0;const root=$('#chans');
+  const keep=new Set(s.channels.map(c=>c.url));[...root.children].forEach(e=>{if(!keep.has(e.dataset.url))e.remove()});
+  for(const c of s.channels){let el=[...root.children].find(e=>e.dataset.url===c.url);
+    if(!el){el=document.createElement('div');el.className='card';el.dataset.url=c.url;
+      el.innerHTML=`<div class="row"><span class="name"></span><span class="plat"></span><span class="st"></span><span class="sp"></span><span class="meta cc"></span>
+      <label class="sw" title="Auto-clip this channel"><input type="checkbox"><i></i></label><button class="danger small">Remove</button></div><canvas></canvas>
+      <div class="meta mm" style="margin-top:6px"></div>`;
+      el.querySelector('input').onchange=e=>api('channels/toggle',{url:c.url,enabled:e.target.checked}).catch(x=>toast(x.message));
+      el.querySelector('.danger').onclick=()=>confirm('Remove '+c.name+'?')&&api('channels/remove',{url:c.url}).then(refresh);
+      root.appendChild(el)}
+    el.querySelector('.name').textContent=c.name;el.querySelector('.plat').textContent=c.platform;
+    const st=el.querySelector('.st');st.className='st'+(c.live?' live':'');
+    st.textContent=!c.enabled?'paused':c.live?'LIVE — recording':c.status==='checking'?'checking…':'offline — waiting for stream';
+    el.querySelector('.cc').textContent=c.clip_count?c.clip_count+' clip(s) this session':'';
+    el.querySelector('input').checked=c.enabled;
+    el.querySelector('canvas').style.display=c.live?'block':'none';
+    el.querySelector('.mm').textContent=c.live?`chat: ${c.msgs_min} msgs/min  ·  purple = engagement, yellow = hype spam (XD/KEKW…), red = clip triggered`:'';
+    if(c.live)draw(el.querySelector('canvas'),c.score,c.hype,{marks:c.marks})}
+  const m=s.model,sub=$('#sub');sub.className='pill';
+  if(!s.settings.subs)sub.textContent='Subtitles off';
+  else if(m.state==='ready'){sub.textContent='Subtitles ready';sub.classList.add('ok')}
+  else if(m.state==='loading'){sub.textContent='Loading subtitle model…';sub.classList.add('warn')}
+  else if(m.state==='error'){sub.textContent='Subtitle model unavailable';sub.classList.add('warn');sub.title=m.error}
+  else sub.textContent='';
+  window.OUT=s.out;window.ST=s;if(window.wasConn===false&&s.youtube.connected)toast('YouTube connected ✓');window.wasConn=s.youtube.connected;if(tab==='youtube')ytStat()}
+$('#add').onclick=async()=>{const u=$('#url').value.trim();if(!u)return;try{await api('channels',{url:u});$('#url').value='';refresh()}catch(e){toast(e.message)}};
+$('#url').onkeydown=e=>e.key==='Enter'&&$('#add').click();
+$('#open').onclick=()=>api('reveal',{}).catch(e=>toast(e.message));
+$('#quit').onclick=()=>{if(confirm('Quit AutoClipper? Clipping stops while the app is closed.')){api('quit',{}).finally(()=>document.body.innerHTML='<div class="empty" style="margin-top:20vh">AutoClipper has been closed. You can close this tab.</div>')}};
+
+/* clips */
+let known=new Set(),first=true;
+async function loadClips(){let list;try{list=await api('clips')}catch(e){return}
+  const root=$('#clips'),hide=$('#hideDone').checked;
+  const pending=list.filter(c=>!c.uploaded).length;$('#cnt').hidden=!pending;$('#cnt').textContent=pending;
+  if(!first)list.forEach(c=>{if(!known.has(c.name))toast('🎬 New clip: '+c.name)});
+  list.forEach(c=>known.add(c.name));first=false;
+  $('#cempty').hidden=list.length>0;$('#clipinfo').textContent=list.length?list.length+' clips · saved in '+(window.OUT||''):'';
+  if(tab!=='clips')return;
+  const keep=new Set(list.map(c=>c.name));[...root.children].forEach(e=>{if(!keep.has(e.dataset.n))e.remove()});
+  let prev=null;
+  for(const c of list){let el=[...root.children].find(e=>e.dataset.n===c.name);
+    if(!el){el=document.createElement('div');el.className='clip';el.dataset.n=c.name;
+      const ex=(c.top_emotes||[]).map(x=>`<span class="chip">${x}</span>`).join('');
+      el.innerHTML=`<video controls preload="metadata" src="/clips/${encodeURIComponent(c.name)}.mp4"></video><div class="b">
+        <div class="title"></div><div class="meta">${c.channel} · ${c.detected_at} · ${c.size_mb} MB</div>${ex}<canvas></canvas>
+        <div class="acts"><button class="ghost small cp">Copy title</button><button class="pri small yt">▶ YouTube</button><button class="ghost small rv">Show file</button>
+        <label><input type="checkbox" class="up"> uploaded</label><span class="sp"></span><button class="danger small dl">Delete</button></div></div>`;
+      el.querySelector('.title').textContent=c.suggested_title||c.name;
+      el.querySelector('.cp').onclick=()=>navigator.clipboard.writeText(c.suggested_title||c.name).then(()=>toast('Title copied'));
+      el.querySelector('.rv').onclick=()=>api('reveal',{name:c.name});el.querySelector('.yt').onclick=()=>openUp(c);
+      el.querySelector('.up').onchange=e=>{api('clips/mark',{name:c.name,uploaded:e.target.checked});el.classList.toggle('done',e.target.checked)};
+      el.querySelector('.dl').onclick=()=>confirm('Delete this clip permanently?')&&api('clips/delete',{name:c.name}).then(loadClips);
+      const s=c.series;if(s)requestAnimationFrame(()=>draw(el.querySelector('canvas'),s.score,s.hype,{marks:[s.trig],band:[s.clip_start,s.clip_end]}));
+      root.insertBefore(el,prev?prev.nextSibling:root.firstChild)}
+    el.querySelector('.up').checked=!!c.uploaded;el.classList.toggle('done',!!c.uploaded);
+    el.hidden=hide&&!!c.uploaded;prev=el}}
+$('#hideDone').onchange=loadClips;
+
+/* settings */
+const F=['sensitivity','format','pre','post','subs','model','cooldown','quality','encoder','buffer','hype_words','out'];
+async function fillSettings(){const s=(await api('state')).settings;
+  F.forEach(k=>{const e=$('#s_'+k);e.value=k==='subs'?(s.subs?'1':'0'):s[k]});$('#v_pre').textContent=s.pre;$('#v_post').textContent=s.post}
+$('#s_pre').oninput=e=>$('#v_pre').textContent=e.target.value;$('#s_post').oninput=e=>$('#v_post').textContent=e.target.value;
+$('#save').onclick=async()=>{const b={};F.forEach(k=>{const v=$('#s_'+k).value;b[k]=k==='subs'?v==='1':v});
+  try{await api('settings',b);$('#saved').textContent='Saved ✓ (applies to the next clip)';setTimeout(()=>$('#saved').textContent='',4000);refresh()}catch(e){toast(e.message)}};
+
+/* youtube */
+const CATS=[['20','Gaming'],['24','Entertainment'],['22','People & Blogs'],['23','Comedy'],['17','Sports'],['10','Music'],['25','News & Politics'],['1','Film & Animation']];
+['s_yt_category','u_category'].forEach(i=>$('#'+i).innerHTML=CATS.map(([v,n])=>`<option value="${v}">${n}</option>`).join(''));
+const esc=t=>String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const YF=['yt_client_id','yt_client_secret','yt_description','yt_tags','yt_category','yt_privacy'];
+function ytStat(){const y=window.ST.youtube,p=$('#ytstat');p.className='pill '+(y.connected?'ok':'warn');p.textContent=y.connected?'Connected':y.configured?'Not connected':'Setup needed'}
+function ytFill(){if(!window.ST)return;YF.forEach(k=>$('#s_'+k).value=window.ST.settings[k]);ytStat();loadUploads()}
+$('#ytconnect').onclick=async()=>{try{await api('settings',{yt_client_id:$('#s_yt_client_id').value,yt_client_secret:$('#s_yt_client_secret').value});
+  window.wasConn=false;await api('youtube/connect',{});toast('Finish the Google login in your browser…')}catch(e){toast(e.message)}};
+$('#ytdisc').onclick=()=>confirm('Disconnect YouTube?')&&api('youtube/disconnect',{}).then(()=>{window.wasConn=undefined;refresh()});
+$('#ytconsole').onclick=()=>api('open',{url:'https://console.cloud.google.com/'});
+$('#ytdef').onclick=async()=>{const b={};['yt_description','yt_tags','yt_category','yt_privacy'].forEach(k=>b[k]=$('#s_'+k).value);
+  try{await api('settings',b);toast('Defaults saved');refresh()}catch(e){toast(e.message)}};
+let upClip=null;
+function openUp(c){if(!window.ST||!window.ST.youtube.connected){toast('Connect YouTube first (YouTube tab)');document.querySelector('[data-tab=youtube]').click();return}
+  upClip=c;const s=window.ST.settings;$('#u_title').value=c.suggested_title||c.name;$('#u_desc').value=s.yt_description;$('#u_tags').value=s.yt_tags;
+  $('#u_privacy').value=s.yt_privacy;$('#u_category').value=s.yt_category;$('#u_when').value='now';$('#u_at').hidden=true;$('#u_hint').textContent='';
+  $('#u_shorts').checked=s.format==='vertical';$('#upm').classList.add('on')}
+$('#u_when').onchange=e=>{const sc=e.target.value==='sched';$('#u_at').hidden=!sc;
+  $('#u_hint').textContent=sc?"It uploads now as private and YouTube publishes it automatically at that time (your computer's time zone).":'';
+  if(sc&&!$('#u_at').value){const d=new Date(Date.now()+3600e3);d.setMinutes(0,0,0);$('#u_at').value=new Date(d-d.getTimezoneOffset()*6e4).toISOString().slice(0,16)}};
+$('#u_x').onclick=()=>$('#upm').classList.remove('on');
+$('#u_go').onclick=async()=>{const b={name:upClip.name,title:$('#u_title').value,description:$('#u_desc').value,tags:$('#u_tags').value,
+  privacy:$('#u_privacy').value,category:$('#u_category').value,shorts:$('#u_shorts').checked};
+  if($('#u_when').value==='sched'){const v=$('#u_at').value;if(!v){toast('Pick a date and time');return}b.publish_at=new Date(v).toISOString()}
+  try{await api('uploads',b);$('#upm').classList.remove('on');toast('Added to the upload queue');loadUploads()}catch(e){toast(e.message)}};
+async function loadUploads(){let l;try{l=await api('uploads')}catch(e){return}
+  $('#uqempty').hidden=l.length>0;
+  $('#uq').innerHTML=l.map(u=>{const when=u.publish_at?'🗓 publishes '+new Date(u.publish_at).toLocaleString():u.privacy;
+    const st=u.status==='uploading'?'uploading '+u.progress+'%':u.status;
+    return `<div class="row" data-id="${u.id}" style="padding:10px 0;border-top:1px solid var(--line)"><div class="sp"><div class="title">${esc(u.title)}</div>
+      <div class="meta">${esc(u.name)} · ${when}${u.error?' · <span style="color:var(--hot)">'+esc(u.error)+'</span>':''}</div></div>
+      <span class="pill ${u.status==='done'?'ok':u.status==='error'?'warn':''}">${st}</span>
+      ${u.status==='done'?`<button class="ghost small" data-a="open" data-v="${esc(u.video_id)}">Open in Studio</button>`:''}
+      ${u.status==='error'||u.status==='cancelled'?'<button class="ghost small" data-a="retry">Retry</button>':''}
+      ${u.status==='queued'||u.status==='uploading'?'<button class="ghost small" data-a="cancel">Cancel</button>':''}
+      ${u.status!=='uploading'?'<button class="danger small" data-a="remove">Remove</button>':''}</div>`}).join('')}
+$('#uq').onclick=e=>{const b=e.target.closest('button');if(!b)return;const id=b.closest('[data-id]').dataset.id,a=b.dataset.a;
+  if(a==='open')api('open',{url:'https://studio.youtube.com/video/'+b.dataset.v+'/edit'});else api('uploads/'+a,{id}).then(loadUploads)};
+setInterval(()=>{if(tab==='youtube')loadUploads()},3000);
+
+/* log */
+let seq=0;async function pollLog(){try{const j=await api('logs?since='+seq);if(j.lines.length){const b=$('#logbox'),atEnd=b.scrollTop+b.clientHeight>=b.scrollHeight-30;
+  b.textContent+=j.lines.join('\n')+'\n';seq=j.seq;if(atEnd)b.scrollTop=b.scrollHeight}}catch(e){}}
+refresh();loadClips();pollLog();setInterval(refresh,2000);setInterval(loadClips,5000);setInterval(pollLog,2000);
+</script></body></html>
