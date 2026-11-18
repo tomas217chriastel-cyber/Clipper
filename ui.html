@@ -16,7 +16,7 @@ button.danger{color:var(--hot)}button.small{padding:4px 9px;font-size:12px}
 main{max-width:1120px;margin:0 auto;padding:22px}
 .pill{font-size:12px;padding:3px 9px;border-radius:20px;background:var(--panel2);color:var(--mut)}
 .pill.ok{color:var(--ok)}.pill.warn{color:var(--warn)}
-.addrow{display:flex;gap:8px;margin-bottom:18px}
+.addrow{display:flex;gap:8px;margin-bottom:18px}.addrow button{white-space:nowrap;flex:none}
 input[type=text],input[type=number],select{background:var(--panel);border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:9px 11px;font:inherit;width:100%}
 input:focus,select:focus{outline:1px solid var(--acc)}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
@@ -53,6 +53,27 @@ textarea{background:var(--panel);border:1px solid var(--line);color:var(--tx);bo
 .ent .ev{min-width:26px;font-variant-numeric:tabular-nums;color:var(--ent)}
 .chip.why{color:var(--ent)}.chip.why.hype{color:var(--hot)}
 #live{font-size:11px}#live.on{color:var(--ok)}
+#chans{display:flex;flex-direction:column}
+.dot{width:10px;height:10px;border-radius:50%;background:#3a4152;flex:none}.dot.on{background:var(--hot);box-shadow:0 0 0 4px rgba(255,93,108,.18);animation:pulse 1.6s infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 7px rgba(255,93,108,.05)}}
+.name{cursor:text}.slug{font-size:12px}input.rn{width:240px;padding:4px 8px}
+.pres{margin-top:6px;font-size:12px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pres.on{color:var(--tx)}.pres b{color:var(--hot)}
+.trg{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.trg:empty{display:none}
+.tchip{font-size:11px;padding:2px 9px;border-radius:20px;background:var(--panel2);color:var(--mut);cursor:default}
+.tchip.done{color:var(--ok)}.tchip.failed{color:var(--hot)}.tchip.waiting,.tchip.queued,.tchip.rendering{color:var(--warn)}
+#onl.on{color:var(--hot)}
+h4.sh{margin:24px 0 12px;font-size:12px;color:var(--acc2);text-transform:uppercase;letter-spacing:.7px}h4.sh:first-child{margin-top:0}
+.sws{display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+.sws button{width:26px;height:26px;border-radius:50%;border:2px solid var(--line);cursor:pointer;padding:0}
+.sws button.on{border-color:#fff;box-shadow:0 0 0 2px var(--acc)}
+.sws input[type=color]{width:38px;height:28px;border:1px solid var(--line);background:var(--panel);border-radius:6px;padding:2px;cursor:pointer}
+.prevwrap{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.subprev{position:relative;width:190px;aspect-ratio:9/16;border-radius:10px;overflow:hidden;flex:none;
+  background:linear-gradient(160deg,#4b2d7a 0%,#155e75 55%,#1c1c22 100%)}
+.subprev.h{width:340px;aspect-ratio:16/9}
+.subprev .vid{position:absolute;left:0;right:0;background:repeating-linear-gradient(45deg,#2a3346 0 12px,#323c52 12px 24px)}
+.subprev .txt{position:absolute;left:6px;right:6px;text-align:center;line-height:1.12;paint-order:stroke fill;overflow-wrap:anywhere}
+.clip video{aspect-ratio:auto}
 </style></head><body>
 <header>
   <div class="brand">✂ Auto<span>Clipper</span></div>
@@ -63,13 +84,14 @@ textarea{background:var(--panel);border:1px solid var(--line);color:var(--tx);bo
     <button data-tab="settings">Settings</button>
     <button data-tab="log">Log</button>
   </nav>
-  <div class="right"><span id="live" class="pill"></span><span id="sub" class="pill"></span>
+  <div class="right"><span id="onl" class="pill" title="Channels streaming right now"></span><span id="live" class="pill"></span><span id="sub" class="pill"></span>
     <button class="ghost" id="open">📂 Clips folder</button><button class="ghost" id="quit">Quit</button></div>
 </header>
 <main>
 <section id="t-channels">
   <div class="addrow"><input type="text" id="url" placeholder="Paste a Twitch, Kick or YouTube live link — e.g. https://twitch.tv/streamer">
-    <button class="pri" id="add">Add channel</button></div>
+    <input type="text" id="label" maxlength="60" placeholder="Name (optional)" style="max-width:220px">
+    <button class="pri" id="add">Add channel</button><button class="ghost" id="recheck" title="Check right now who is live">↻ Check now</button></div>
   <div id="chans"></div>
   <div class="empty" id="chempty" hidden>No channels yet. Paste a stream link above — AutoClipper will wait for it to go live and clip it automatically.<br>Keep this app open (you can minimise it).</div>
 </section>
@@ -91,14 +113,35 @@ textarea{background:var(--panel);border:1px solid var(--line);color:var(--tx);bo
       <div class="hint">Lower = more clips. Watch the cyan line on the Channels tab to pick a good level.</div></div>
     <div><label>Stream volume in the meter</label><select id="s_use_audio"><option value="1">On – loud moments (screaming, explosions) count</option><option value="0">Off – chat only</option></select></div>
     <div><label>Format</label><select id="s_format"><option value="vertical">Vertical 9:16 (Shorts)</option><option value="horizontal">Horizontal 16:9</option></select></div>
+    <div><label>Picture in the clip</label><select id="s_framing">
+      <option value="crop">Fill the frame – crop the sides (sharp, no blur, no bars)</option>
+      <option value="zoom">Bigger picture – trim to 4:3, black bars (vertical)</option>
+      <option value="fit">Whole picture – black bars</option>
+      <option value="blur">Whole picture – blurred background (old style)</option></select>
+      <div class="hint">The stream always keeps its real proportions (never stretched) and is scaled with a sharp filter. For the sharpest result keep 1080p first in the quality list (Advanced).</div></div>
     <div><label>Seconds before spike: <b id="v_pre"></b></label><input type="range" id="s_pre" min="10" max="90" style="width:100%"></div>
     <div><label>Seconds after spike: <b id="v_post"></b></label><input type="range" id="s_post" min="4" max="45" style="width:100%"></div>
     <div><label>Subtitles</label><select id="s_subs"><option value="1">On (Whisper, runs on your PC)</option><option value="0">Off</option></select></div>
     <div><label>Subtitle model</label><select id="s_model"><option>tiny</option><option>base</option><option>small</option><option>medium</option></select>
       <div class="hint">Bigger = more accurate but slower. Models not bundled download once on first use.</div></div>
   </div>
+  <h4 class="sh">Subtitle look</h4>
+  <div class="prevwrap"><div class="form" style="flex:1;min-width:300px">
+    <div><label>Style</label><select id="s_sub_style"><option value="karaoke">Word highlight – the spoken word lights up</option>
+      <option value="plain">Plain – 1–3 words at a time</option><option value="word">One big word at a time</option></select></div>
+    <div><label>Font</label><select id="s_sub_font"></select></div>
+    <div><label>Size</label><select id="s_sub_size"><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option><option value="xl">Extra large</option></select></div>
+    <div><label>Position</label><select id="s_sub_position"><option value="lower">Lower third</option><option value="bottom">Bottom</option><option value="middle">Middle</option><option value="top">Top</option></select></div>
+    <div class="full"><label>Text colour</label><div class="sws" data-k="sub_color"></div></div>
+    <div class="full"><label>Highlight colour (spoken word)</label><div class="sws" data-k="sub_highlight"></div></div>
+    <div class="full"><label>Outline colour</label><div class="sws" data-k="sub_outline"></div></div>
+    <div><label>Letters</label><select id="s_sub_upper"><option value="1">UPPERCASE</option><option value="0">Normal case</option></select></div>
+    <div><label>Spoken language</label><select id="s_sub_language"></select>
+      <div class="hint">Picking the language gives more accurate subtitles than auto-detect.</div></div>
+  </div><div><label class="meta" style="display:block;margin-bottom:4px">Preview</label><div id="subprev" class="subprev"><div class="vid"></div><div class="txt"></div></div></div></div>
   <details><summary>Advanced</summary><div class="form" style="margin-top:12px">
     <div><label>Cooldown between clips (sec)</label><input type="number" id="s_cooldown"></div>
+    <div><label>Check who is live every (sec)</label><input type="number" id="s_poll" min="15" max="600"></div>
     <div><label>Stream quality (fallback list)</label><input type="text" id="s_quality"></div>
     <div><label>Video encoder</label><select id="s_encoder"><option>libx264</option><option value="h264_nvenc">h264_nvenc (NVIDIA)</option><option value="h264_videotoolbox">h264_videotoolbox (Mac)</option><option value="h264_qsv">h264_qsv (Intel)</option><option value="h264_amf">h264_amf (AMD)</option></select></div>
     <div><label>Rolling buffer (sec)</label><input type="number" id="s_buffer"></div>
@@ -165,7 +208,18 @@ function draw(cv,score,hype,o={}){const dpr=devicePixelRatio||1,w=cv.clientWidth
   if(o.ent&&o.ent.length===n){line(o.ent,ENTC,null,100);
     if(o.thr){const y=Y(o.thr,100);g.strokeStyle='rgba(34,211,238,.45)';g.setLineDash([2,4]);g.beginPath();g.moveTo(0,y);g.lineTo(w,y);g.stroke();g.setLineDash([])}}
   (o.marks||[]).forEach(m=>{const[i,r]=Array.isArray(m)?m:[m,o.reason||'hype'];const x=i/(n-1)*w;g.strokeStyle=MARKC[r]||MARKC.hype;g.lineWidth=1.6;
-    g.setLineDash([4,3]);g.beginPath();g.moveTo(x,0);g.lineTo(x,h);g.stroke();g.setLineDash([])})}
+    g.setLineDash([4,3]);g.beginPath();g.moveTo(x,0);g.lineTo(x,h);g.stroke();g.setLineDash([]);
+    if(Array.isArray(m)&&m[2]){g.fillStyle=STC[m[2]]||STC.waiting;g.beginPath();g.arc(Math.min(Math.max(x,6),w-6),7,4.5,0,7);g.fill()}})}
+const STC={done:'#34d399',failed:'#8b93a7',waiting:'#fbbf24',queued:'#fbbf24',rendering:'#fbbf24'};
+const TST={waiting:'⏳ recording the after-part',queued:'⏳ waiting to render',rendering:'⚙️ rendering…',done:'✅ saved',failed:'❌ not saved'};
+const fmtN=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e4?Math.round(n/1e3)+'k':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);
+function since(t){const ms=Date.now()-Date.parse(t);if(!(ms>0))return'';const m=Math.floor(ms/6e4);return m<60?m+'m':Math.floor(m/60)+'h '+(m%60)+'m'}
+function presText(c){const p=c.presence||{};
+  if(p.live===true){const b=['<b>● LIVE</b>'];if(p.viewers!=null)b.push(fmtN(p.viewers)+' watching');const d=p.since&&since(p.since);if(d)b.push('for '+d);
+    if(p.category)b.push(esc(p.category));if(p.title)b.push('“'+esc(p.title)+'”');return b.join(' · ')}
+  if(p.live===false)return p.exists===false?'⚠ channel not found — check the link':'⚫ offline';
+  if(p.error)return 'quick live check unavailable — using the slower check';
+  return 'checking who is online…'}
 const PARTN={activity:'chat speed',crowd:'chatters',reaction:'reactions',audio:'stream volume'};
 
 /* channels */
@@ -173,25 +227,40 @@ async function refresh(){let s;try{s=await api('state')}catch(e){return}renderSt
 function renderState(s){
   $('#chempty').hidden=s.channels.length>0;const root=$('#chans');
   const keep=new Set(s.channels.map(c=>c.url));[...root.children].forEach(e=>{if(!keep.has(e.dataset.url))e.remove()});
-  for(const c of s.channels){let el=[...root.children].find(e=>e.dataset.url===c.url);
+  let nlive=0;
+  for(const c of s.channels){let el=[...root.children].find(e=>e.dataset.url===c.url);const p=c.presence||{};const on=c.live||p.live===true;if(on)nlive++;
     if(!el){el=document.createElement('div');el.className='card';el.dataset.url=c.url;
-      el.innerHTML=`<div class="row"><span class="name"></span><span class="plat"></span><span class="st"></span><span class="sp"></span><span class="meta cc"></span>
-      <label class="sw" title="Auto-clip this channel"><input type="checkbox"><i></i></label><button class="danger small">Remove</button></div>
+      el.innerHTML=`<div class="row"><span class="dot"></span><span class="name" title="Double-click to rename"></span><input type="text" class="rn" maxlength="60" hidden placeholder="Your name for this channel">
+      <button class="ghost small ren" title="Rename this channel">✏️ Rename</button><span class="meta slug"></span><span class="plat"></span><span class="st"></span><span class="sp"></span><span class="meta cc"></span>
+      <label class="sw" title="Auto-clip this channel"><input type="checkbox" class="tg"><i></i></label><button class="danger small rm">Remove</button></div>
+      <div class="pres"></div>
       <div class="ent" hidden><span class="el">🎭 Entertainment</span><div class="eb"><div class="ef"></div><div class="et"></div></div><b class="ev"></b><span class="ep meta"></span></div>
       <canvas></canvas>
-      <div class="meta mm" style="margin-top:6px"></div>`;
-      el.querySelector('input').onchange=e=>api('channels/toggle',{url:c.url,enabled:e.target.checked}).catch(x=>toast(x.message));
-      el.querySelector('.danger').onclick=()=>confirm('Remove '+c.name+'?')&&api('channels/remove',{url:c.url}).then(refresh);
+      <div class="meta mm" style="margin-top:6px"></div><div class="trg"></div>`;
+      el.querySelector('.tg').onchange=e=>api('channels/toggle',{url:c.url,enabled:e.target.checked}).catch(x=>toast(x.message));
+      el.querySelector('.rm').onclick=()=>confirm('Remove '+(el.dataset.disp||c.name)+'?')&&api('channels/remove',{url:c.url}).then(refresh);
+      const rn=el.querySelector('.rn'),nm=el.querySelector('.name');
+      const edit=()=>{el.dataset.editing='1';rn.value=el.dataset.label||'';rn.placeholder=c.name;rn.hidden=false;nm.hidden=true;rn.focus();rn.select()};
+      const done=save=>{if(!el.dataset.editing)return;delete el.dataset.editing;rn.hidden=true;nm.hidden=false;
+        if(save&&rn.value.trim()!==(el.dataset.label||''))api('channels/rename',{url:c.url,label:rn.value}).then(()=>{toast(rn.value.trim()?'Renamed ✓':'Name reset');refresh()}).catch(x=>toast(x.message))};
+      el.querySelector('.ren').onclick=edit;nm.ondblclick=edit;
+      rn.onkeydown=e=>{if(e.key==='Enter')done(true);if(e.key==='Escape')done(false)};rn.onblur=()=>done(true);
       root.appendChild(el)}
-    el.querySelector('.name').textContent=c.name;el.querySelector('.plat').textContent=c.platform;
+    el.dataset.label=c.label||'';el.dataset.disp=c.display||c.name;el.style.order=on?0:1;
+    if(!el.dataset.editing)el.querySelector('.name').textContent=c.display||c.name;
+    el.querySelector('.slug').textContent=c.label?c.name:'';
+    el.querySelector('.dot').classList.toggle('on',on);
+    el.querySelector('.plat').textContent=c.platform;
+    const pr=el.querySelector('.pres');pr.innerHTML=presText(c);pr.classList.toggle('on',p.live===true);pr.title=p.title||'';
     const st=el.querySelector('.st');st.className='st'+(c.live?' live':'');
-    st.textContent=!c.enabled?'paused':c.live?'LIVE — recording':c.status==='checking'?'checking…':'offline — waiting for stream';
+    st.textContent=!c.enabled?(p.live?'paused — streaming now, auto-clip is off':'paused'):c.live?'LIVE — recording':p.live?'starting recorder…':c.status==='checking'?'checking…':'offline — waiting for stream';
     el.querySelector('.cc').textContent=c.clip_count?c.clip_count+' clip(s) this session':'';
-    el.querySelector('input').checked=c.enabled;
+    el.querySelector('.tg').checked=c.enabled;
     el.querySelector('canvas').style.display=c.live?'block':'none';
     const useEnt=c.trigger!=='hype';
     el.querySelector('.mm').textContent=c.live?`chat: ${c.msgs_min} msgs/min  ·  purple = engagement, yellow = hype spam (XD/KEKW…), cyan = entertainment meter`+
-      `  ·  clips: red line = hype spike, cyan line = entertaining moment`+(c.trigger==='hype'?'  ·  (entertainment clipping is off in Settings)':''):'';
+      `  ·  red line = hype spike, cyan line = entertaining moment; dot on top: yellow = clip in progress, green = saved, grey = failed`+(c.trigger==='hype'?'  ·  (entertainment clipping is off in Settings)':''):'';
+    el.querySelector('.trg').innerHTML=(c.recent||[]).map(r=>`<span class="tchip ${r.status}" title="${esc(r.status==='failed'?r.error:r.file||'')}">${r.reason==='hype'?'🔥':'🎭'} ${r.at} · ${TST[r.status]||r.status}${r.status==='failed'&&r.error?' — '+esc(r.error.slice(0,90)):''}</span>`).join('');
     const en=el.querySelector('.ent');en.hidden=!c.live;
     if(c.live){const v=c.ent_now||0,thr=c.ent_threshold||70;
       en.querySelector('.ef').style.width=v+'%';en.querySelector('.ef').classList.toggle('hot',useEnt&&v>=thr);
@@ -199,15 +268,19 @@ function renderState(s){
       en.querySelector('.ev').textContent=v;
       en.querySelector('.ep').textContent=Object.entries(c.ent_parts||{}).map(([k,x])=>`${PARTN[k]||k} ${Math.round(x*100)}%`).join(' · ');
       draw(el.querySelector('canvas'),c.score,c.hype,{marks:c.marks,ent:c.ent,thr:useEnt?thr:0})}}
+  const o=$('#onl');o.textContent=s.channels.length?`● ${nlive} live / ${s.channels.length}`:'';o.className='pill'+(nlive?' on':'');
   const m=s.model,sub=$('#sub');sub.className='pill';
   if(!s.settings.subs)sub.textContent='Subtitles off';
   else if(m.state==='ready'){sub.textContent='Subtitles ready';sub.classList.add('ok')}
   else if(m.state==='loading'){sub.textContent='Loading subtitle model…';sub.classList.add('warn')}
   else if(m.state==='error'){sub.textContent='Subtitle model unavailable';sub.classList.add('warn');sub.title=m.error}
   else sub.textContent='';
+  if(s.fonts&&!window.FONTS_LOADED){window.FONTS_LOADED=1;const st=document.createElement('style');
+    st.textContent=Object.entries(s.fonts).map(([n,f])=>`@font-face{font-family:"AC ${n}";src:url(/fonts/${f}) format("truetype")}`).join('');document.head.appendChild(st)}
   window.OUT=s.out;window.ST=s;if(window.wasConn===false&&s.youtube.connected)toast('YouTube connected ✓');window.wasConn=s.youtube.connected;if(tab==='youtube')ytStat()}
-$('#add').onclick=async()=>{const u=$('#url').value.trim();if(!u)return;try{await api('channels',{url:u});$('#url').value='';refresh()}catch(e){toast(e.message)}};
-$('#url').onkeydown=e=>e.key==='Enter'&&$('#add').click();
+$('#add').onclick=async()=>{const u=$('#url').value.trim();if(!u)return;try{await api('channels',{url:u,label:$('#label').value});$('#url').value='';$('#label').value='';refresh()}catch(e){toast(e.message)}};
+$('#url').onkeydown=$('#label').onkeydown=e=>e.key==='Enter'&&$('#add').click();
+$('#recheck').onclick=()=>api('channels/refresh',{}).then(()=>toast('Checking who is live…')).catch(e=>toast(e.message));
 $('#open').onclick=()=>api('reveal',{}).catch(e=>toast(e.message));
 $('#quit').onclick=()=>{if(confirm('Quit AutoClipper? Clipping stops while the app is closed.')){api('quit',{}).finally(()=>document.body.innerHTML='<div class="empty" style="margin-top:20vh">AutoClipper has been closed. You can close this tab.</div>')}};
 
@@ -228,8 +301,9 @@ function renderClips(list){lastClips=list;
       const why=c.reason==='entertainment'?`<span class="chip why">🎭 entertainment ${c.spike&&c.spike.entertainment!=null?c.spike.entertainment+'/100':''}</span>`
         :`<span class="chip why hype">🔥 hype spike</span>`;
       const ex=why+(c.top_emotes||[]).map(x=>`<span class="chip">${esc(x)}</span>`).join('');
-      el.innerHTML=`<video controls preload="metadata" src="/clips/${encodeURIComponent(c.name)}.mp4"></video><div class="b">
-        <div class="title"></div><div class="meta">${c.channel} · ${c.detected_at} · ${c.size_mb} MB</div>${ex}<canvas></canvas>
+      const q=encodeURIComponent(c.name);
+      el.innerHTML=`<video controls preload="none" poster="/clips/${q}.png" src="/clips/${q}.mp4"></video><div class="b">
+        <div class="title"></div><div class="meta">${esc(c.label||c.channel)} · ${c.detected_at} · ${c.duration?c.duration+'s · ':''}${c.size_mb} MB</div>${ex}<canvas></canvas>
         <div class="acts"><button class="ghost small cp">Copy title</button><button class="pri small yt">▶ YouTube</button><button class="ghost small rv">Show file</button>
         <label><input type="checkbox" class="up"> uploaded</label><span class="sp"></span><button class="danger small dl">Delete</button></div></div>`;
       el.querySelector('.title').textContent=c.suggested_title||c.name;
@@ -244,11 +318,38 @@ function renderClips(list){lastClips=list;
 $('#hideDone').onchange=()=>lastClips?renderClips(lastClips):loadClips();
 
 /* settings */
-const F=['sensitivity','trigger','ent_threshold','use_audio','format','pre','post','subs','model','cooldown','quality','encoder','buffer','hype_words','out'];
-const BOOL=new Set(['subs','use_audio']);
-async function fillSettings(){const s=(await api('state')).settings;
-  F.forEach(k=>{const e=$('#s_'+k);e.value=BOOL.has(k)?(s[k]?'1':'0'):s[k]});
-  ['pre','post','ent_threshold'].forEach(k=>$('#v_'+k).textContent=s[k])}
+const F=['sensitivity','trigger','ent_threshold','use_audio','format','framing','pre','post','subs','model','cooldown','poll','quality','encoder','buffer','hype_words','out',
+  'sub_style','sub_font','sub_size','sub_position','sub_color','sub_highlight','sub_outline','sub_upper','sub_language'];
+const BOOL=new Set(['subs','use_audio','sub_upper']);
+const PALETTE=['#FFFFFF','#FFE600','#FFC400','#FF8A00','#FF3B30','#FF2D95','#E040FB','#8B5CF6','#3B82F6','#00C2FF','#00E5A8','#22C55E','#A3FF12','#9CA3AF','#111111','#000000'];
+const LANGS=[['auto','Auto-detect'],['en','English'],['cs','Czech'],['sk','Slovak'],['de','German'],['pl','Polish'],['es','Spanish'],['fr','French'],['it','Italian'],['pt','Portuguese'],['nl','Dutch'],['hu','Hungarian'],['ru','Russian'],['uk','Ukrainian'],['tr','Turkish'],['ar','Arabic'],['ja','Japanese'],['ko','Korean'],['zh','Chinese']];
+document.querySelectorAll('.sws').forEach(box=>{const k=box.dataset.k;
+  box.innerHTML=PALETTE.map(c=>`<button type="button" style="background:${c}" data-c="${c}" title="${c}"></button>`).join('')+`<input type="color" id="s_${k}" title="Any colour">`;
+  const inp=box.querySelector('input');
+  box.onclick=e=>{const b=e.target.closest('button');if(!b)return;inp.value=b.dataset.c.toLowerCase();syncSw();subPreview()};
+  inp.oninput=()=>{syncSw();subPreview()}});
+function syncSw(){document.querySelectorAll('.sws').forEach(box=>{const v=box.querySelector('input').value.toLowerCase();
+  box.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.c.toLowerCase()===v))})}
+$('#s_sub_language').innerHTML=LANGS.map(([v,n])=>`<option value="${v}">${n}</option>`).join('');
+function subPreview(){const v=k=>$('#s_'+k).value,vert=v('format')==='vertical',box=$('#subprev'),t=box.querySelector('.txt'),vid=box.querySelector('.vid');
+  box.classList.toggle('h',!vert);const H=box.clientHeight||338,k=H/(vert?1920:1080);
+  const fr=v('framing');if(fr==='crop'){vid.style.top='0';vid.style.bottom='0'}else{const vh=vert?(fr==='zoom'?1080*3/4:1080*9/16)/1920:1;vid.style.top=vid.style.bottom=((1-vh)/2*100)+'%'}
+  const fs={small:[70,52],medium:[84,62],large:[100,74],xl:[122,90]}[v('sub_size')][vert?0:1]*k;
+  const pos={bottom:[240,50],lower:[560,130],middle:[null,null],top:[300,60]}[v('sub_position')];const mv=pos[vert?0:1];
+  t.style.top=t.style.bottom='';t.style.transform='';
+  if(v('sub_position')==='middle'){t.style.top='50%';t.style.transform='translateY(-50%)'}else if(v('sub_position')==='top')t.style.top=mv*k+'px';else t.style.bottom=mv*k+'px';
+  t.style.fontFamily=`"AC ${v('sub_font')}",sans-serif`;t.style.fontSize=fs+'px';t.style.color=v('sub_color');
+  const ow=Math.max(1.5,fs*0.075*2);t.style.webkitTextStroke=ow+'px '+v('sub_outline');t.style.textShadow=`0 ${Math.max(1,fs*.04)}px 0 ${v('sub_outline')}99`;
+  let words=v('sub_style')==='word'?['CRAZY']:['THIS','IS','CRAZY'];if(v('sub_upper')==='0')words=words.map(w=>w[0]+w.slice(1).toLowerCase());
+  const hi=v('sub_style')==='karaoke'?words.length-1:-1;
+  t.innerHTML=words.map((w,i)=>i===hi?`<span style="color:${v('sub_highlight')}">${w}</span>`:w).join(' ')}
+['format','framing','sub_style','sub_font','sub_size','sub_position','sub_upper'].forEach(k=>$('#s_'+k).addEventListener('change',subPreview));
+async function fillSettings(){const st=await api('state'),s=st.settings;
+  const fs=$('#s_sub_font');if(!fs.options.length)fs.innerHTML=Object.keys(st.fonts||{}).map(n=>`<option>${esc(n)}</option>`).join('');
+  const lg=$('#s_sub_language');if(![...lg.options].some(o=>o.value===s.sub_language))lg.insertAdjacentHTML('beforeend',`<option value="${esc(s.sub_language)}">${esc(s.sub_language)}</option>`);
+  F.forEach(k=>{const e=$('#s_'+k);const x=s[k];e.value=BOOL.has(k)?(x?'1':'0'):(e.type==='color'?String(x).toLowerCase():x)});
+  ['pre','post','ent_threshold'].forEach(k=>$('#v_'+k).textContent=s[k]);syncSw();requestAnimationFrame(subPreview);
+  if(document.fonts)document.fonts.ready.then(subPreview)}
 ['pre','post','ent_threshold'].forEach(k=>$('#s_'+k).oninput=e=>$('#v_'+k).textContent=e.target.value);
 $('#save').onclick=async()=>{const b={};F.forEach(k=>{const v=$('#s_'+k).value;b[k]=BOOL.has(k)?v==='1':v});
   try{await api('settings',b);$('#saved').textContent='Saved ✓ (applies right away)';setTimeout(()=>$('#saved').textContent='',4000);refresh()}catch(e){toast(e.message)}};

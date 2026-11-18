@@ -1,8 +1,9 @@
 """
 AutoClipper core engine.
 
-Per channel: wait for live -> record rolling buffer -> read chat -> detect hype spike ->
-cut [spike-30s, spike+12s] -> Whisper subtitles -> MP4 + metadata JSON.
+Per channel: quick live check -> record rolling buffer (indexed to the exact second) -> read chat ->
+detect hype spike / entertainment -> cut [spike-30s, spike+12s] -> Whisper subtitles (bundled fonts,
+word highlight) -> MP4 + thumbnail + metadata JSON.
 Everything (streamlink, yt-dlp, ffmpeg) is used in-process / via bundled binaries,
 so a frozen (PyInstaller) build needs nothing installed on the user's machine.
 """
@@ -10,7 +11,7 @@ from __future__ import annotations
 
 import array
 import collections
-import glob
+import html as _html
 import json
 import math
 import os
@@ -470,7 +471,7 @@ def find_source(url, quality):
         import yt_dlp
 
         opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True,
-                "format": "best[height<=720]/best"}
+                "format": "best[height<=1080]/best"}
         with yt_dlp.YoutubeDL(opts) as y:
             info = y.extract_info(url, download=False)
         if info and info.get("is_live"):
@@ -494,13 +495,223 @@ def yt_video_id(url, src):
         return y.extract_info(url, download=False).get("id")
 
 
+
+
+# --------------------------------------------------------------------------- live presence (fast "who is online" checks)
+#
+# streamlink/yt-dlp take several seconds per channel. These checks are one small web request each
+# (one request for ALL Twitch channels), so the app knows within a second or two who is live, how many
+# people are watching and what they are streaming - also for channels whose auto-clipping is paused.
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/124.0 Safari/537.36")
+TWITCH_CID = "kimne78kx3ncx6brgo4mv6wki5h1ko"  # Twitch's public web-player client id (no login needed)
+
+
+def _ssl_ctx():
+    try:
+        import certifi  # bundled with streamlink/requests; the frozen app may not see the OS certificates
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def _http(url, data=None, headers=None, timeout=8):
+    h = {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"}
+    h.update(headers or {})
+    req = urllib.request.Request(url, data=data, headers=h)
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
+        return r.read()
+
+
+def twitch_presence(slugs):
+    """All Twitch channels in ONE request -> {slug: info}."""
+    slugs = [s for s in dict.fromkeys(slugs) if re.fullmatch(r"\w{1,40}", s)]
+    if not slugs:
+        return {}
+    q = "query{" + " ".join(f'u{i}:user(login:"{s}"){{stream{{viewersCount title createdAt game{{name}}}}}}'
+                            for i, s in enumerate(slugs)) + "}"
+    raw = _http("https://gql.twitch.tv/gql", json.dumps({"query": q}).encode(),
+                {"Client-Id": TWITCH_CID, "Content-Type": "application/json"})
+    return parse_twitch_reply(json.loads(raw), slugs)
+
+
+def parse_twitch_reply(reply, slugs):
+    data = reply.get("data") if isinstance(reply, dict) else None
+    if not isinstance(data, dict):
+        raise RuntimeError("unexpected Twitch reply")
+    out = {}
+    for i, s in enumerate(slugs):
+        u = data.get(f"u{i}")
+        st = (u or {}).get("stream")
+        out[s] = dict(live=bool(st), exists=u is not None)
+        if st:
+            out[s].update(viewers=st.get("viewersCount"), title=st.get("title") or "",
+                          category=(st.get("game") or {}).get("name") or "", since=st.get("createdAt") or "")
+    return out
+
+
+def kick_presence(slug):
+    url = f"https://kick.com/api/v2/channels/{slug}"
+    try:
+        from curl_cffi import requests as cr  # bypasses Cloudflare TLS fingerprinting
+
+        d = cr.get(url, impersonate="chrome", timeout=10).json()
+    except ImportError:
+        d = json.loads(_http(url, timeout=10))
+    return parse_kick_reply(d)
+
+
+def parse_kick_reply(d):
+    if not isinstance(d, dict) or ("livestream" not in d and "slug" not in d):
+        raise RuntimeError("unexpected Kick reply")
+    ls = d.get("livestream")
+    if not ls or ls.get("is_live") is False:
+        return dict(live=False)
+    cats = ls.get("categories") or []
+    return dict(live=True, viewers=ls.get("viewer_count"), title=ls.get("session_title") or "",
+                category=(cats[0] or {}).get("name", "") if cats else "", since=ls.get("created_at") or "")
+
+
+def youtube_live_page(url):
+    u = urllib.parse.urlparse(url)
+    if u.netloc.endswith("youtu.be") or u.path.startswith(("/watch", "/live/")):
+        return url
+    parts = [p for p in u.path.split("/") if p]
+    if parts and parts[-1] in ("streams", "videos", "featured", "live", "shorts", "about", "community"):
+        parts = parts[:-1]
+    return "https://www.youtube.com/" + "/".join(parts) + "/live"
+
+
+def parse_youtube_page(page):
+    info = dict(live='"isLiveNow":true' in page)
+    if info["live"]:
+        m = re.search(r'<meta name="title" content="([^"]*)"', page)
+        info["title"] = _html.unescape(m.group(1)) if m else ""
+        i = page.find('"videoDetails"')
+        m = re.search(r'"viewCount":"(\d+)"', page[i:i + 30000]) if i >= 0 else None
+        info["viewers"] = int(m.group(1)) if m else None
+        m = re.search(r'"startTimestamp":"([^"]+)"', page)
+        info["since"] = m.group(1) if m else ""
+        info["category"] = ""
+    return info
+
+
+def youtube_presence(url):
+    page = _http(youtube_live_page(url), headers={"Cookie": "SOCS=CAI; CONSENT=YES+1"}, timeout=10)
+    return parse_youtube_page(page.decode("utf8", "replace"))
+
+
+def presence(url):
+    """Quick live check of one channel -> dict(live=True/False, viewers, title, category, since)."""
+    platform, slug, _ = parse_target(url)
+    if platform == "kick":
+        return kick_presence(slug)
+    if platform == "youtube":
+        return youtube_presence(normalize_url(url))
+    return twitch_presence([slug]).get(slug, dict(live=False))
+
+
+# --------------------------------------------------------------------------- recording
+
+
+class SegIndex:
+    """Finished recording segments and the real (wall-clock) moment each one shows.
+
+    ffmpeg appends a line "file,start,end" to segments.csv the moment a segment is complete. We note
+    when each line appeared and add up the exact segment lengths, so every second of footage maps to
+    real time within a fraction of a second - however long the segments really are (they can only be
+    cut on keyframes) and even when several segments arrive in the same clock second.
+    """
+
+    WINDOW = 30  # segments used to estimate the stream delay
+
+    def __init__(self, seg_dir):
+        self.dir, self.csv = seg_dir, os.path.join(seg_dir, "segments.csv")
+        self.lock = threading.Lock()
+        self.items = []  # dict(path, cum, dur, seen)
+        self.cum, self.pos, self.buf = 0.0, 0, b""
+        self.anchor = None  # wall time of footage second 0
+
+    def poll(self):
+        try:
+            with open(self.csv, "rb") as f:
+                f.seek(self.pos)
+                data = f.read()
+        except OSError:
+            return
+        if not data:
+            return
+        now = time.time()
+        with self.lock:
+            self.pos += len(data)
+            self.buf += data
+            *lines, self.buf = self.buf.split(b"\n")
+            added = False
+            for ln in lines:
+                parts = ln.decode("utf8", "replace").strip().rsplit(",", 2)
+                if len(parts) != 3:
+                    continue
+                try:
+                    dur = float(parts[2]) - float(parts[1])
+                except ValueError:
+                    continue
+                if not 0 < dur < 120:
+                    dur = float(SEG)
+                name = os.path.basename(parts[0].strip().strip('"'))
+                self.items.append(dict(path=os.path.join(self.dir, name), cum=self.cum, dur=dur, seen=now))
+                self.cum += dur
+                added = True
+            if added:
+                # seen - footage_end = network/buffer delay (+ when we happened to look). Delay only ever
+                # adds, so a low percentile of recent values is the most accurate and ignores hiccups.
+                offs = sorted(it["seen"] - (it["cum"] + it["dur"]) for it in self.items[-self.WINDOW:])
+                self.anchor = offs[len(offs) // 4]
+
+    def end_wall(self):
+        with self.lock:
+            return self.anchor + self.cum if self.anchor is not None else 0.0
+
+    def finished(self):
+        with self.lock:
+            if self.anchor is None:
+                return []
+            return [(self.anchor + it["cum"], it["path"]) for it in self.items]
+
+    def pieces(self, t0, t1):
+        """[(wall_start, duration, path)] of every finished segment that overlaps [t0, t1]."""
+        with self.lock:
+            if self.anchor is None:
+                return []
+            a = self.anchor
+            return [(a + it["cum"], it["dur"], it["path"]) for it in self.items
+                    if a + it["cum"] + it["dur"] > t0 and a + it["cum"] < t1 and os.path.exists(it["path"])]
+
+    def prune(self, before):
+        with self.lock:
+            if self.anchor is None:
+                return
+            keep = []
+            for it in self.items:
+                if self.anchor + it["cum"] + it["dur"] < before:
+                    try:
+                        os.remove(it["path"])
+                    except OSError:
+                        pass
+                else:
+                    keep.append(it)
+            self.items = keep
+
+
 class Recorder:
-    """Source -> ffmpeg (stream copy) -> rolling 4s .ts segments named by wall-clock time."""
+    """Source -> ffmpeg (stream copy) -> rolling ~4s .ts segments + segments.csv index."""
 
     def __init__(self, src, seg_dir):
         self.src, self.seg_dir = src, seg_dir
         self.p = self.fd = None
         self._stop = False
+        self.index = SegIndex(seg_dir)
 
     def start(self):
         ff = [FFMPEG, "-nostdin", "-loglevel", "error"]
@@ -511,8 +722,10 @@ class Recorder:
             ff += ["-i", self.src.url]
         else:
             ff += ["-i", "pipe:0"]
+        # numbered files (never overwrite each other) + a CSV with each segment's exact length
         ff += ["-c", "copy", "-f", "segment", "-segment_time", str(SEG), "-segment_format", "mpegts",
-               "-reset_timestamps", "1", "-strftime", "1", os.path.join(self.seg_dir, "seg_%Y%m%d_%H%M%S.ts")]
+               "-reset_timestamps", "1", "-segment_list", os.path.join(self.seg_dir, "segments.csv"),
+               "-segment_list_type", "csv", os.path.join(self.seg_dir, "seg_%06d.ts")]
         errlog = open(os.path.join(self.seg_dir, "recorder.log"), "wb")
         self.p = subprocess.Popen(ff, stdin=subprocess.PIPE if piped else subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL, stderr=errlog, **popen_kw())
@@ -540,23 +753,67 @@ class Recorder:
         return self.p is not None and self.p.poll() is None
 
     def stop(self):
+        """Ends recording so that ffmpeg still finishes (and indexes) the last segment."""
         self._stop = True
-        if self.p and self.p.poll() is None:
-            self.p.terminate()
-        if self.fd:
+        for c in (self.fd, self.p.stdin if self.p else None):  # end of input -> ffmpeg finalizes cleanly
             try:
-                self.fd.close()
+                if c:
+                    c.close()
             except Exception:
                 pass
+        if not self.p:
+            return
+        for sig in (None, "terminate", "kill"):
+            if sig:
+                getattr(self.p, sig)()
+            try:
+                self.p.wait(timeout=5)
+                return
+            except subprocess.TimeoutExpired:
+                continue
+            except Exception:
+                return
 
 
-def seg_start(path):
-    m = re.search(r"seg_(\d{8}_\d{6})\.ts$", path)
-    return time.mktime(time.strptime(m.group(1), "%Y%m%d_%H%M%S"))
+class Session:
+    """One recording of a live stream. Its footage is kept until every clip that needs it has copied it."""
 
+    def __init__(self, src, seg_dir):
+        os.makedirs(seg_dir, exist_ok=True)
+        self.dir = seg_dir
+        self.rec = Recorder(src, seg_dir)
+        self.index = self.rec.index
+        self.lock = threading.Lock()
+        self.refs, self.ended = 0, False
 
-def list_segs(d):
-    return sorted((seg_start(p), p) for p in glob.glob(os.path.join(d, "seg_*.ts")))
+    def start(self):
+        self.rec.start()
+        threading.Thread(target=self._poll, daemon=True).start()
+
+    def _poll(self):
+        while not self.ended:
+            self.index.poll()
+            time.sleep(0.25)
+
+    def hold(self):
+        with self.lock:
+            self.refs += 1
+
+    def release(self):
+        with self.lock:
+            self.refs -= 1
+            gone = self.ended and self.refs <= 0
+        if gone:
+            shutil.rmtree(self.dir, ignore_errors=True)
+
+    def end(self):
+        self.rec.stop()
+        self.index.poll()  # pick up the last segment ffmpeg wrote while shutting down
+        with self.lock:
+            self.ended = True
+            gone = self.refs <= 0
+        if gone:
+            shutil.rmtree(self.dir, ignore_errors=True)
 
 
 AUDIO_RATE = 8000
@@ -578,31 +835,50 @@ def segment_loudness(path):
     return out
 
 
-def audio_watch(seg_dir, meter, stop):
+def audio_watch(sess, meter, stop):
     """Feeds the entertainment meter with how loud the stream is (shouting, screaming, explosions...)."""
     done = set()
     warned = False
-    while not stop.wait(2):
-        segs = list_segs(seg_dir)
-        for st, p in segs[:-1]:  # the newest segment is still being written
+    while not stop.wait(1):
+        fin = sess.index.finished()
+        for st, p in fin:
             if p in done:
                 continue
             done.add(p)
             try:
                 for i, db in enumerate(segment_loudness(p)):
-                    meter.add_audio(int(st) + i, db)
+                    meter.add_audio(int(round(st + i)), db)
             except Exception as e:
                 if not warned:
                     log("audio", f"loudness unavailable, meter uses chat only: {e}")
                     warned = True
-        live = {p for _, p in segs}
-        done &= live
+        if len(done) > 400:
+            done &= {p for _, p in fin}
 
 
-# --------------------------------------------------------------------------- subtitles + render
+# --------------------------------------------------------------------------- subtitles
 
 _model, _model_name, _mlock = None, None, threading.Lock()
 MODEL = {"state": "idle", "error": ""}  # for the UI
+
+FONTS = {  # name in Settings (= font family name) -> bundled file in fonts/
+    "Montserrat ExtraBold": "Montserrat-ExtraBold.ttf",
+    "Montserrat Black": "Montserrat-Black.ttf",
+    "Poppins ExtraBold": "Poppins-ExtraBold.ttf",
+    "Archivo Black": "ArchivoBlack-Regular.ttf",
+    "Anton": "Anton-Regular.ttf",
+    "Bebas Neue": "BebasNeue-Regular.ttf",
+}
+DEFAULT_FONT = "Montserrat ExtraBold"
+SUB_STYLES = ("karaoke", "plain", "word")
+SUB_SIZES = dict(small=(70, 52), medium=(84, 62), large=(100, 74), xl=(122, 90))  # (vertical, horizontal)
+SUB_POS = dict(bottom=((2, 240), (2, 50)), lower=((2, 560), (2, 130)),  # (alignment, margin) per format
+               middle=((5, 0), (5, 0)), top=((8, 300), (8, 60)))
+FRAMINGS = ("crop", "zoom", "fit", "blur")
+
+
+def fonts_dir():
+    return os.path.join(resource_dir(), "fonts")
 
 
 def model_ref(name):
@@ -639,31 +915,60 @@ def preload_model(cfg):
     threading.Thread(target=run, daemon=True).start()
 
 
+def clean_words(words):
+    """Drops Whisper's typical junk: the same word looping over and over."""
+    out = []
+    for w in words:
+        if len(out) >= 3 and all(o[2].lower() == w[2].lower() for o in out[-3:]):
+            continue
+        out.append(w)
+    return out
+
+
 def transcribe(cfg, wav):
     model = get_model(cfg)
+    lang = getattr(cfg, "sub_language", "auto") or "auto"
     with _mlock:
-        segs, _ = model.transcribe(wav, word_timestamps=True, vad_filter=True, beam_size=1)
-        return [(w.start, w.end, w.word.strip()) for s in segs for w in (s.words or []) if w.word.strip()]
+        segs, _ = model.transcribe(
+            wav, language=None if lang == "auto" else lang, word_timestamps=True,
+            vad_filter=True, vad_parameters=dict(min_silence_duration_ms=400, speech_pad_ms=200),
+            beam_size=5, best_of=5, condition_on_previous_text=False)  # no repeated/hallucinated lines
+        words = []
+        for s in segs:
+            if s.no_speech_prob > 0.7 and s.avg_logprob < -0.8:  # "words" heard in music/noise
+                continue
+            for w in s.words or []:
+                t = w.word.strip()
+                if t and (getattr(w, "probability", None) is None or w.probability >= 0.15):
+                    words.append((w.start, w.end, t))
+    return clean_words(words)
 
 
 def _ts(t):
+    t = max(0.0, t)
     return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{t % 60:05.2f}"
 
 
-def build_ass(words, vertical, path):
-    W, H, fs, mv = (1080, 1920, 88, 440) if vertical else (1920, 1080, 66, 80)
-    head = (
-        "[Script Info]\nScriptType: v4.00+\n"
-        f"PlayResX: {W}\nPlayResY: {H}\nWrapStyle: 2\n\n"
-        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
-        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, "
-        "Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,Arial,{fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,6,2,2,60,60,{mv},1\n\n"
-        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-    )
+def _hex(c, default="FFFFFF"):
+    c = str(c or "").lstrip("#")
+    return c.upper() if re.fullmatch(r"[0-9a-fA-F]{6}", c) else default
+
+
+def ass_style_color(c, alpha=0, default="FFFFFF"):
+    h = _hex(c, default)
+    return f"&H{alpha:02X}{h[4:6]}{h[2:4]}{h[0:2]}"
+
+
+def ass_tag_color(c, default="FFFFFF"):
+    h = _hex(c, default)
+    return f"&H{h[4:6]}{h[2:4]}{h[0:2]}&"
+
+
+def chunk_words(words, max_words, max_chars):
     chunks, cur = [], []
     for w in words:
-        if cur and (len(cur) >= 4 or w[0] - cur[-1][1] > 0.7):
+        n = sum(len(x[2]) + 1 for x in cur) + len(w[2])
+        if cur and (len(cur) >= max_words or n > max_chars or w[0] - cur[-1][1] > 0.6):
             chunks.append(cur)
             cur = []
         cur.append(w)
@@ -672,89 +977,214 @@ def build_ass(words, vertical, path):
             cur = []
     if cur:
         chunks.append(cur)
+    return chunks
+
+
+def _word_txt(t, upper):
+    s = t.strip()
+    s = s.rstrip(",.;:") or s  # keep ? and ! - they carry the emotion
+    if upper:
+        s = s.upper()
+    return s.replace("\\", "/").replace("{", "(").replace("}", ")")
+
+
+POP = r"{\fscx82\fscy82\t(0,90,\fscx106\fscy106)\t(90,170,\fscx100\fscy100)}"  # quick "pop in"
+
+
+def build_ass(words, cfg, vertical, path):
+    """Shorts-style subtitles: bundled bold sans-serif font, thick outline, 1-3 words at a time,
+    the word being spoken highlighted in its own colour."""
+    W, H = (1080, 1920) if vertical else (1920, 1080)
+    k = 0 if vertical else 1
+    fs = SUB_SIZES.get(getattr(cfg, "sub_size", "large"), SUB_SIZES["large"])[k]
+    align, mv = SUB_POS.get(getattr(cfg, "sub_position", "lower"), SUB_POS["lower"])[k]
+    font = getattr(cfg, "sub_font", DEFAULT_FONT)
+    font = font if font in FONTS else DEFAULT_FONT
+    mode = getattr(cfg, "sub_style", "karaoke")
+    upper = getattr(cfg, "sub_upper", True)
+    text_c, hl_c, out_c = (getattr(cfg, "sub_color", "#FFFFFF"), getattr(cfg, "sub_highlight", "#FFE600"),
+                           getattr(cfg, "sub_outline", "#000000"))
+    prim, outl = ass_style_color(text_c), ass_style_color(out_c, 0, "000000")
+    shadow_c = ass_style_color(out_c, 0x70, "000000")
+    hl, back = ass_tag_color(hl_c, "FFE600"), ass_tag_color(text_c)
+    outline, shadow = max(3, round(fs * 0.075)), max(2, round(fs * 0.04))
+    head = (
+        "[Script Info]\nScriptType: v4.00+\n"
+        f"PlayResX: {W}\nPlayResY: {H}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, "
+        "Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{font},{fs},{prim},{prim},{outl},{shadow_c},0,0,0,0,100,100,1,0,1,"
+        f"{outline},{shadow},{align},70,70,{mv},1\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+    if mode == "word":
+        chunks = [[w] for w in words]
+    else:
+        chunks = chunk_words(words, 3 if vertical else 6, 18 if vertical else 34)
     lines = []
+
+    def dia(a, b, txt):
+        lines.append(f"Dialogue: 0,{_ts(a)},{_ts(max(b, a + 0.05))},Default,,0,0,0,,{txt}")
+
     for i, ch in enumerate(chunks):
-        start, end = ch[0][0], max(ch[-1][1], ch[0][0] + 0.35)
+        start = ch[0][0]
+        end = max(ch[-1][1], start + 0.35) + 0.2
         if i + 1 < len(chunks):
-            end = min(end + 0.15, chunks[i + 1][0][0])
-        txt = " ".join(x[2] for x in ch).upper().replace("{", "(").replace("}", ")")
-        lines.append(f"Dialogue: 0,{_ts(start)},{_ts(max(end, start + 0.1))},Default,,0,0,0,,{txt}")
+            end = min(end, chunks[i + 1][0][0])
+        end = max(end, start + 0.1)
+        txts = [_word_txt(w[2], upper) for w in ch]
+        if mode == "karaoke":
+            for j, w in enumerate(ch):
+                a = start if j == 0 else w[0]
+                b = ch[j + 1][0] if j + 1 < len(ch) else end
+                if b - a < 0.02:
+                    continue
+                body = " ".join("{\\c%s}%s{\\c%s}" % (hl, t, back) if n == j else t for n, t in enumerate(txts))
+                dia(a, b, (POP if j == 0 else "") + body)
+        else:
+            dia(start, end, POP + " ".join(txts))
     with open(path, "w", encoding="utf8") as f:
         f.write(head + "\n".join(lines) + "\n")
 
 
-def render(cfg, segs, t0, t1, out, tmp):
-    """segs: [(start_ts, path)] copied into tmp. Returns transcript words. Falls back gracefully."""
-    first = segs[0][0]
-    off = max(0.0, t0 - first)
-    dur = t1 - (first + off)
+# --------------------------------------------------------------------------- render
+
+
+def frame_filter(framing, W, H):
+    """How the stream picture fills the clip frame. Always keeps the real proportions (no stretching)."""
+    sq = "scale='trunc(iw*sar/2)*2':ih,setsar=1"  # square pixels first -> correct aspect ratio
+    lz = "flags=lanczos"  # sharpest scaler, so upscaled footage does not look soft
+    if framing == "crop":  # fill the whole frame, cut the sides
+        return f"[0:v]{sq},scale={W}:{H}:force_original_aspect_ratio=increase:{lz},crop={W}:{H},setsar=1[v]"
+    if framing in ("fit", "zoom"):  # whole picture (zoom: trimmed to 4:3 so it is bigger), black bars
+        trim = ",crop='min(iw,trunc(ih*4/3/2)*2)':ih" if framing == "zoom" and H > W else ""
+        return (f"[0:v]{sq}{trim},scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2:{lz},"
+                f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v]")
+    return (f"[0:v]{sq},split=2[a][b];[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"  # blur
+            f"gblur=sigma=30[bg];[b]scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2:{lz}[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v]")
+
+
+def enc_args(encoder):
+    if encoder == "libx264":
+        v = ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-profile:v", "high"]
+    else:
+        v = ["-c:v", encoder, "-b:v", "12M", "-maxrate", "16M", "-bufsize", "24M"]
+    return v + ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart"]
+
+
+def render(cfg, pieces, t0, t1, out, tmp):
+    """pieces: [(wall_start, duration, path)] already copied into tmp.
+    Returns (words, real_start, real_end). Falls back to simpler settings rather than losing the clip."""
+    first, last_end = pieces[0][0], pieces[-1][0] + pieces[-1][1]
+    a, b = max(t0, first), min(t1, last_end)
+    if b - a < 3:
+        raise RuntimeError("less than 3 seconds of footage recorded for this moment")
     lst = os.path.join(tmp, "list.txt")
-    with open(lst, "w") as f:
-        for _, p in segs:
-            f.write("file '%s'\n" % os.path.abspath(p).replace("\\", "/").replace("'", "'\\''"))
+    with open(lst, "w", encoding="utf8") as f:
+        for _, d, p in pieces:  # exact segment lengths -> frame-accurate cut points
+            f.write("file '%s'\nduration %.6f\n" % (os.path.abspath(p).replace("\\", "/").replace("'", "'\\''"), d))
     base = [FFMPEG, "-y", "-nostdin", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", lst,
-            "-ss", f"{off:.2f}", "-t", f"{dur:.2f}"]
+            "-ss", f"{a - first:.3f}", "-t", f"{b - a:.3f}"]
     vertical = cfg.format == "vertical"
+    W, H = (1080, 1920) if vertical else (1920, 1080)
     words = []
     if not cfg.no_subs:
         wav = os.path.join(tmp, "audio.wav")
-        sh(base + ["-vn", "-ac", "1", "-ar", "16000", wav])
         try:
+            sh(base + ["-vn", "-ac", "1", "-ar", "16000", wav])
             words = transcribe(cfg, wav)
         except Exception as e:
             log("subs", f"transcription skipped: {e}")
     if words:
-        build_ass(words, vertical, os.path.join(tmp, "subs.ass"))
-    enc = ["-c:v", cfg.encoder] + (["-preset", "veryfast", "-crf", "21"] if cfg.encoder == "libx264" else ["-b:v", "8M"])
-    enc += ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart"]
+        build_ass(words, cfg, vertical, os.path.join(tmp, "subs.ass"))
+        fd = os.path.join(tmp, "fonts")
+        os.makedirs(fd, exist_ok=True)
+        for fn in FONTS.values():
+            src = os.path.join(fonts_dir(), fn)
+            if os.path.exists(src):
+                shutil.copy(src, fd)
+    framing = getattr(cfg, "framing", "crop")
 
-    def attempt(use_subs, blur):
-        if vertical:
-            fc = ("[0:v]split=2[a][b];[a]scale=1080:1920:force_original_aspect_ratio=increase,"
-                  f"crop=1080:1920,{blur}[bg];[b]scale=1080:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v]")
-        else:
-            fc = ("[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-                  "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[v]")
-        fc += ";[v]ass=subs.ass[out]" if use_subs else ";[v]null[out]"
-        sh(base + ["-filter_complex", fc, "-map", "[out]", "-map", "0:a?"] + enc + [os.path.abspath(out)], cwd=tmp)
+    def attempt(subs, frm, enc):
+        fc = frame_filter(frm, W, H)
+        fc += {2: ";[v]ass=subs.ass:fontsdir=fonts[out]", 1: ";[v]ass=subs.ass[out]", 0: ";[v]null[out]"}[subs]
+        sh(base + ["-filter_complex", fc, "-map", "[out]", "-map", "0:a?"] + enc_args(enc) + [os.path.abspath(out)],
+           cwd=tmp)
 
-    variants = ([(True, "gblur=sigma=30")] if words else []) + [(False, "gblur=sigma=30"), (False, "boxblur=20:5")]
+    encs = [cfg.encoder] + (["libx264"] if cfg.encoder != "libx264" else [])
+    variants = [(s, framing, e) for e in encs for s in ((2, 1, 0) if words else (0,))] + [(0, "fit", "libx264")]
     last = None
-    for use_subs, blur in variants:
+    for v in variants:
         try:
-            attempt(use_subs, blur)
-            return words
+            attempt(*v)
+            if v != variants[0]:
+                log("render", f"rendered with fallback settings {v}")
+            return words, a, b
         except RuntimeError as e:
             last = e
-            log("render", f"retrying with simpler filters ({str(e)[:120]})")
+            log("render", f"retrying with simpler settings ({str(e)[:160]})")
     raise last
+
+
+def thumbnail(mp4, at, png):
+    try:
+        sh([FFMPEG, "-y", "-nostdin", "-loglevel", "error", "-ss", f"{max(0.0, at):.2f}", "-i", mp4,
+            "-frames:v", "1", "-vf", "scale=480:-2", png])
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- per-channel worker
 
+RENDER_SLOTS = threading.Semaphore(1)  # one clip renders at a time, so recording never starves for CPU
+
+
+def safe_label(s):
+    return re.sub(r"[^\w@.-]+", "_", s).strip("_.")[:60]
+
 
 class Worker(threading.Thread):
-    def __init__(self, cfg, url):
+    def __init__(self, cfg, url, label="", presence=None):
         super().__init__(daemon=True)
         self.cfg, self.url = cfg, normalize_url(url)
         self.platform, self.slug, self.name = parse_target(self.url)
-        self.seg_dir = os.path.join(cfg.work, self.name)
+        self.label = label or ""
+        self.presence = presence if presence is not None else {}
         self.stop = threading.Event()
+        self.wake = threading.Event()
         self.meter = None
         self.live = False
         self.status = "checking"
-        self.trigs = []
+        self.trigs = []  # dict(t, reason, status, file, error) - the lines on the graph and what became of them
         self.clip_count = 0
+
+    @property
+    def display(self):
+        return self.label or self.name
+
+    def halt(self):
+        self.stop.set()
+        self.wake.set()
 
     def run(self):
         while not self.stop.is_set():
+            p = self.presence.get(self.url) or {}
+            fresh = time.time() - p.get("checked", 0) < max(self.cfg.poll * 3, 90)
+            if fresh and p.get("live") is False:  # quick check says offline -> don't bother streamlink
+                self.live, self.status = False, "offline"
+                self.wake.wait(5)
+                self.wake.clear()
+                continue
             self.status = "checking"
             src = find_source(self.url, self.cfg.quality)
             if self.stop.is_set():
                 break
             if not src:
                 self.live, self.status = False, "offline"
-                self.stop.wait(self.cfg.poll)
+                self.wake.wait(20 if p.get("live") else self.cfg.poll)
+                self.wake.clear()
                 continue
             self.live, self.status = True, "live"
             log(self.name, "LIVE - recording + watching chat")
@@ -764,7 +1194,7 @@ class Worker(threading.Thread):
                 log(self.name, f"session error: {e}")
             self.live, self.status = False, "offline"
             log(self.name, "recorder stopped / stream ended; re-checking soon")
-            self.stop.wait(15)
+            self.stop.wait(5)
         self.live, self.status = False, "stopped"
 
     def start_chat(self, stop_s, src):
@@ -782,18 +1212,15 @@ class Worker(threading.Thread):
 
     def session(self, src):
         cfg = self.cfg
-        shutil.rmtree(self.seg_dir, ignore_errors=True)
-        os.makedirs(self.seg_dir)
+        sess = Session(src, os.path.join(cfg.work, self.name, f"{time.strftime('%Y%m%d_%H%M%S')}_{random.randint(100, 999)}"))
         self.meter = Meter(cfg)
-        self.trigs = []
         stop_s = threading.Event()
-        self.start_chat(stop_s, src)
-        rec = Recorder(src, self.seg_dir)
-        rec.start()
-        threading.Thread(target=audio_watch, args=(self.seg_dir, self.meter, stop_s), daemon=True).start()
-        last_trig = 0.0
         try:
-            while not self.stop.is_set() and rec.alive():
+            self.start_chat(stop_s, src)
+            sess.start()
+            threading.Thread(target=audio_watch, args=(sess, self.meter, stop_s), daemon=True).start()
+            last_trig = 0.0
+            while not self.stop.is_set() and sess.rec.alive():
                 time.sleep(1)
                 now = int(time.time()) - 1
                 self.meter.prune(now)
@@ -810,63 +1237,83 @@ class Worker(threading.Thread):
                         hit["reason"] = "entertainment"
                 if hit:
                     last_trig = time.time()
-                    self.trigs.append((trig, hit["reason"]))
+                    tr = dict(t=trig, reason=hit["reason"], status="waiting", file="", error="")
+                    self.trigs = self.trigs[-49:] + [tr]
                     log(self.name, f"{'SPIKE' if hit['reason'] == 'hype' else 'ENTERTAINMENT'} detected {hit}")
-                    threading.Thread(target=self.clip, args=(trig, hit, self.meter), daemon=True).start()
+                    sess.hold()  # keep this footage on disk until the clip has copied it
+                    threading.Thread(target=self.clip, args=(tr, hit, self.meter, sess), daemon=True).start()
                 if now % 60 == 0:
                     n = sum(self.meter.msgs(s) for s in range(now - 59, now + 1))
                     log(self.name, f"chat: {n} msgs/min")
                 if now % 30 == 0:
-                    keep = max(cfg.buffer, cfg.pre + cfg.post + 60)
-                    for st, p in list_segs(self.seg_dir):
-                        if st < time.time() - keep:
-                            try:
-                                os.remove(p)
-                            except OSError:
-                                pass
+                    sess.index.prune(time.time() - max(cfg.buffer, cfg.pre + cfg.post + 90))
         finally:
             stop_s.set()
-            rec.stop()
+            sess.end()
 
-    def clip(self, trig, hit, meter):
+    def clip(self, tr, hit, meter, sess):
         cfg = self.cfg
+        trig = tr["t"]
+        t0, t1 = trig - cfg.pre, trig + cfg.post
         tmp = tempfile.mkdtemp(prefix="ac_")
+        held = True
         try:
-            pre, post = cfg.pre, cfg.post
-            time.sleep(post + SEG + 2)  # let post-roll footage land on disk
-            t0, t1 = trig - pre, trig + post
-            picked = []
-            for s, p in list_segs(self.seg_dir):
-                if t0 - SEG - 3 <= s <= t1:
-                    dst = os.path.join(tmp, os.path.basename(p))
+            # 1) wait until the after-part is really recorded (or the stream/recorder ended)
+            deadline = time.time() + cfg.post + 90
+            while time.time() < deadline and sess.index.end_wall() < t1 + 0.3 and not sess.ended:
+                time.sleep(0.5)
+            # 2) copy the footage right away, so nothing (buffer cleanup, stream restart) can delete it
+            pieces = []
+            for st, d, p in sess.index.pieces(t0, t1):
+                dst = os.path.join(tmp, os.path.basename(p))
+                try:
                     shutil.copy(p, dst)
-                    picked.append((s, dst))
-            if not picked:
-                log(self.name, "no footage in buffer for this spike (stream just started?)")
-                return
-            os.makedirs(cfg.out, exist_ok=True)
-            name = re.sub(r"[^\w@.-]", "_", f"{self.name}_{time.strftime('%Y%m%d_%H%M%S', time.localtime(trig))}")
-            out = os.path.join(cfg.out, name + ".mp4")
-            words = render(cfg, picked, t0, t1, out, tmp)
-            a = int(trig) - 150
-            rng = range(a, int(t1) + 20)
+                    pieces.append((st, d, dst))
+                except OSError:
+                    pass
+            sess.release()
+            held = False
+            if not pieces:
+                raise RuntimeError("no footage recorded for this moment (stream had just started or the recorder stopped)")
+            got = min(t1, pieces[-1][0] + pieces[-1][1]) - max(t0, pieces[0][0])
+            if got < (t1 - t0) - 2:
+                log(self.name, f"only {got:.0f}s of the {t1 - t0:.0f}s were recorded; making a shorter clip")
+            # 3) render (one at a time)
+            tr["status"] = "queued"
+            with RENDER_SLOTS:
+                tr["status"] = "rendering"
+                os.makedirs(cfg.out, exist_ok=True)
+                name = f"{safe_label(self.display) or self.name}_{time.strftime('%Y%m%d_%H%M%S', time.localtime(trig))}"
+                base, n = name, 2
+                while os.path.exists(os.path.join(cfg.out, name + ".mp4")):
+                    name, n = f"{base}_{n}", n + 1
+                out = os.path.join(cfg.out, name + ".mp4")
+                words, a, b = render(cfg, pieces, t0, t1, out, tmp)
+                thumbnail(out, trig - a, os.path.join(cfg.out, name + ".png"))
+            s0 = int(trig) - 150
+            rng = range(s0, int(t1) + 20)
             emotes = meter.top_emotes(int(trig) - int(cfg.window), int(trig))
             text = " ".join(w[2] for w in words)
-            title = (text[:70].rsplit(" ", 1)[0] if len(text) > 20 else f"{self.name} chat goes wild {' '.join(emotes[:1])}").strip()
-            meta = dict(channel=self.name, platform=self.platform, source=self.url,
+            title = (text[:70].rsplit(" ", 1)[0] if len(text) > 20 else
+                     f"{self.display} chat goes wild {' '.join(emotes[:1])}").strip()
+            meta = dict(channel=self.name, label=self.display, platform=self.platform, source=self.url,
                         detected_at=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trig)),
                         detected_ts=trig, spike=hit, reason=hit.get("reason", "hype"), top_emotes=emotes,
-                        transcript=text, suggested_title=title, uploaded=False,
-                        series=dict(start=a, score=[meter.score(s) for s in rng], hype=[meter.hype(s) for s in rng],
+                        transcript=text, suggested_title=title, uploaded=False, duration=round(b - a, 1),
+                        series=dict(start=s0, score=[meter.score(s) for s in rng], hype=[meter.hype(s) for s in rng],
                                     ent=[meter.ent(s) for s in rng],
-                                    trig=int(trig) - a, clip_start=int(t0) - a, clip_end=int(t1) - a))
+                                    trig=int(trig) - s0, clip_start=int(a) - s0, clip_end=int(b) - s0))
             with open(os.path.join(cfg.out, name + ".json"), "w", encoding="utf8") as f:
                 json.dump(meta, f, ensure_ascii=False)
             self.clip_count += 1
+            tr.update(status="done", file=name)
             log(self.name, f"CLIP READY -> {out}")
         except Exception as e:
-            log(self.name, f"clip failed: {e}")
+            tr.update(status="failed", error=str(e)[:240])
+            log(self.name, f"CLIP FAILED for the moment at {time.strftime('%H:%M:%S', time.localtime(trig))}: {e}")
         finally:
+            if held:
+                sess.release()
             shutil.rmtree(tmp, ignore_errors=True)
 
     def snapshot(self):
@@ -874,10 +1321,14 @@ class Worker(threading.Thread):
         rng = range(now - N + 1, now + 1)
         on = bool(m and self.live)
         ent = [m.ent(s, final_before=now - ENT_LAG) for s in rng] if on else []
+        recent = [dict(at=time.strftime("%H:%M:%S", time.localtime(t["t"])), reason=t["reason"],
+                       status=t["status"], error=t["error"], file=t["file"]) for t in self.trigs[-8:]][::-1]
         return dict(live=self.live, status=self.status, clip_count=self.clip_count,
                     score=[m.score(s) for s in rng] if on else [],
                     hype=[m.hype(s) for s in rng] if on else [],
                     ent=ent, ent_now=ent[-1] if ent else 0, ent_parts=m.ent_parts(now) if on else {},
                     ent_threshold=self.cfg.ent_threshold, trigger=self.cfg.trigger,
                     msgs_min=sum(m.msgs(s) for s in range(now - 59, now + 1)) if on else 0,
-                    marks=[[int(t - (now - N + 1)), r] for t, r in self.trigs if now - N + 1 <= t <= now])
+                    marks=[[int(t["t"] - (now - N + 1)), t["reason"], t["status"]] for t in self.trigs
+                           if now - N + 1 <= t["t"] <= now],
+                    recent=recent)

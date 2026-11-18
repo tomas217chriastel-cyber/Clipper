@@ -7,6 +7,7 @@ import http.server
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -14,6 +15,7 @@ import time
 import urllib.parse
 import uuid
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import autoclipper as ac
@@ -25,13 +27,20 @@ PRESETS = {
     "high": dict(ratio=2.2, min_users=3, min_score=8, min_hype_share=0.15),     # more clips
 }
 DEFAULTS = dict(out="", format="vertical", subs=True, model="small", pre=30, post=12, sensitivity="medium",
-                cooldown=60, quality="720p60,720p,best", encoder="libx264", hype_words="", buffer=300,
-                window=8, baseline=120, sigma=3.0, hype_weight=2.0, poll=60,
-                trigger="both", ent_threshold=70, use_audio=True,
+                cooldown=60, quality="1080p60,1080p,720p60,720p,best", encoder="libx264", hype_words="", buffer=300,
+                window=8, baseline=120, sigma=3.0, hype_weight=2.0, poll=20,
+                trigger="both", ent_threshold=70, use_audio=True, framing="crop",
+                sub_style="karaoke", sub_font=ac.DEFAULT_FONT, sub_size="large", sub_position="lower",
+                sub_color="#FFFFFF", sub_highlight="#FFE600", sub_outline="#000000", sub_upper=True,
+                sub_language="auto",
                 yt_client_id="", yt_client_secret="", yt_description="", yt_tags="", yt_category="20", yt_privacy="private")
 LIMITS = dict(pre=(10, 90), post=(4, 45), cooldown=(15, 600), buffer=(120, 1800), window=(4, 20),
               baseline=(60, 600), sigma=(1, 8), hype_weight=(0, 6), poll=(15, 600), ent_threshold=(30, 98))
+OLD_DEFAULTS = dict(quality="720p60,720p,best", poll=60)  # upgraded automatically (sharper source, faster live check)
+COLORS = ("sub_color", "sub_highlight", "sub_outline")
 CHOICES = dict(format=("vertical", "horizontal"), sensitivity=tuple(PRESETS),
+               framing=ac.FRAMINGS, sub_style=ac.SUB_STYLES, sub_font=tuple(ac.FONTS),
+               sub_size=tuple(ac.SUB_SIZES), sub_position=tuple(ac.SUB_POS),
                trigger=("hype", "entertainment", "both"),
                model=("tiny", "base", "small", "medium"),
                encoder=("libx264", "h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_amf"),
@@ -41,6 +50,11 @@ MASK = "\u2022\u2022\u2022\u2022\u2022\u2022"
 OPEN_OK = ("https://studio.youtube.com/", "https://youtu.be/", "https://www.youtube.com/",
            "https://console.cloud.google.com/", "https://accounts.google.com/")
 SAFE_NAME = re.compile(r"^[\w@.-]+$")
+
+
+def clean_label(s):
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", str(s or "")).strip()
+    return re.sub(r"\s+", " ", s)[:60]
 
 
 def default_out():
@@ -54,8 +68,11 @@ class Engine:
         self.path = os.path.join(self.dir, "config.json")
         self.lock = threading.RLock()
         self.settings = dict(DEFAULTS)
-        self.channels = []  # [{"url":..., "enabled":bool}]
+        self.channels = []  # [{"url":..., "enabled":bool, "label": optional own name}]
         self.workers = {}
+        self.presence = {}  # url -> quick live check result (live, viewers, title, category, since, checked)
+        self._pkick = threading.Event()
+        self._presence_started = False
         self.cfg = SimpleNamespace()
         self._load()
         self.apply()
@@ -71,6 +88,9 @@ class Engine:
             with open(self.path, encoding="utf8") as f:
                 d = json.load(f)
             self.settings.update({k: v for k, v in d.get("settings", {}).items() if k in DEFAULTS})
+            for k, old in OLD_DEFAULTS.items():
+                if self.settings.get(k) == old:
+                    self.settings[k] = DEFAULTS[k]
             self.channels = [c for c in d.get("channels", []) if "url" in c]
         except (OSError, ValueError):
             pass
@@ -82,7 +102,9 @@ class Engine:
     def apply(self):
         s, c = self.settings, self.cfg
         for k in ("format", "model", "pre", "post", "cooldown", "quality", "encoder", "buffer", "window",
-                  "baseline", "sigma", "hype_weight", "poll", "trigger", "ent_threshold", "use_audio"):
+                  "baseline", "sigma", "hype_weight", "poll", "trigger", "ent_threshold", "use_audio", "framing",
+                  "sub_style", "sub_font", "sub_size", "sub_position", "sub_color", "sub_highlight", "sub_outline",
+                  "sub_upper", "sub_language"):
             setattr(c, k, s[k])
         for k, v in PRESETS.get(s["sensitivity"], PRESETS["medium"]).items():
             setattr(c, k, v)
@@ -110,6 +132,14 @@ class Engine:
                     v = str(v).strip()
                     if k in CHOICES and v not in CHOICES[k]:
                         continue
+                    if k in COLORS:
+                        if not re.fullmatch(r"#?[0-9A-Fa-f]{6}", v):
+                            continue
+                        v = "#" + v.lstrip("#").upper()
+                    if k == "sub_language":
+                        v = v.lower() or "auto"
+                        if not re.fullmatch(r"auto|[a-z]{2,3}", v):
+                            continue
                 self.settings[k] = v
             self.save()
             self.apply()
@@ -118,43 +148,134 @@ class Engine:
 
     # -- channels
     def start_all(self):
+        shutil.rmtree(self.cfg.work, ignore_errors=True)  # recordings left over from the last run
+        os.makedirs(self.cfg.work, exist_ok=True)
+        if not self._presence_started:
+            self._presence_started = True
+            threading.Thread(target=self._presence_loop, daemon=True).start()
         with self.lock:
             for c in self.channels:
                 if c.get("enabled", True):
-                    self._start(c["url"])
+                    self._start(c["url"], c.get("label", ""))
         if self.settings["subs"]:
             ac.preload_model(self.cfg)
 
-    def _start(self, url):
+    def _start(self, url, label=""):
         old = self.workers.get(url)
-        if old and old.is_alive():
+        if old and old.is_alive() and not old.stop.is_set():
             return
-        w = ac.Worker(self.cfg, url)
+        w = ac.Worker(self.cfg, url, label, self.presence)
         self.workers[url] = w
         w.start()
 
     def _stop(self, url):
         w = self.workers.pop(url, None)
         if w:
-            w.stop.set()
+            w.halt()
 
-    def add_channel(self, url):
+    def add_channel(self, url, label=""):
         url = ac.normalize_url(url)
         ac.parse_target(url)  # validates, raises ValueError
+        label = clean_label(label)
         with self.lock:
             if any(c["url"] == url for c in self.channels):
                 raise ValueError("That channel is already in the list")
-            self.channels.append(dict(url=url, enabled=True))
+            self.channels.append(dict(url=url, enabled=True, **({"label": label} if label else {})))
             self.save()
-            self._start(url)
+            self._start(url, label)
+        self._pkick.set()  # check right away whether it is live
+
+    def rename_channel(self, url, label):
+        label = clean_label(label)
+        with self.lock:
+            c = next((c for c in self.channels if c["url"] == url), None)
+            if not c:
+                raise ValueError("Channel not found")
+            if label:
+                c["label"] = label
+            else:
+                c.pop("label", None)
+            self.save()
+            w = self.workers.get(url)
+            if w:
+                w.label = label
 
     def toggle_channel(self, url, enabled):
         with self.lock:
+            label = ""
             for c in self.channels:
                 if c["url"] == url:
                     c["enabled"] = bool(enabled)
+                    label = c.get("label", "")
             self.save()
-            self._start(url) if enabled else self._stop(url)
+            self._start(url, label) if enabled else self._stop(url)
+
+    # -- quick live status for every channel (also paused ones)
+    def refresh_presence(self):
+        self._pkick.set()
+
+    def _presence_loop(self):
+        while True:
+            try:
+                self.check_presence()
+            except Exception as e:
+                ac.log("presence", f"live check failed: {e}")
+            self._pkick.wait(max(15, self.cfg.poll))
+            self._pkick.clear()
+
+    def check_presence(self):
+        with self.lock:
+            urls = [c["url"] for c in self.channels]
+        twitch, others = {}, []
+        for u in urls:
+            try:
+                plat, slug, _ = ac.parse_target(u)
+            except ValueError:
+                continue
+            if plat == "twitch":
+                twitch.setdefault(slug, []).append(u)
+            else:
+                others.append(u)
+        results = {}
+
+        def one(u):
+            try:
+                return u, ac.presence(u)
+            except Exception as e:
+                return u, dict(live=None, error=str(e)[:160])
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futs = [ex.submit(one, u) for u in others]
+            if twitch:  # all Twitch channels in one request, while the others run in parallel
+                try:
+                    r = ac.twitch_presence(list(twitch))
+                    for slug, us in twitch.items():
+                        for u in us:
+                            results[u] = r.get(slug, dict(live=None))
+                except Exception as e:
+                    for us in twitch.values():
+                        for u in us:
+                            results[u] = dict(live=None, error=str(e)[:160])
+            for f in futs:
+                u, info = f.result()
+                results[u] = info
+        now = time.time()
+        for u, info in results.items():
+            prev = self.presence.get(u) or {}
+            if info.get("live") is None:
+                if prev.get("error") != info.get("error"):
+                    ac.log("presence", f"{u}: live check unavailable ({info.get('error')}); using the slower check")
+                if prev.get("live") is not None:  # keep showing the last known state (it goes stale on its own)
+                    info = dict(prev, error=info.get("error"))
+                else:
+                    info["checked"] = now
+            else:
+                info["checked"] = now
+                if info["live"] and not prev.get("live"):
+                    w = self.workers.get(u)
+                    if w:
+                        w.wake.set()  # start recording now instead of at the next slow check
+            self.presence[u] = info
 
     def remove_channel(self, url):
         with self.lock:
@@ -168,13 +289,20 @@ class Engine:
 
     def state(self):
         chans = []
+        now = time.time()
         with self.lock:
             for c in self.channels:
                 platform, slug, name = ac.parse_target(c["url"])
                 w = self.workers.get(c["url"])
-                item = dict(url=c["url"], enabled=c.get("enabled", True), name=name, platform=platform)
+                item = dict(url=c["url"], enabled=c.get("enabled", True), name=name, platform=platform,
+                            label=c.get("label", ""), display=c.get("label") or name)
                 item.update(w.snapshot() if w else dict(status="stopped", live=False, score=[], hype=[], ent=[],
-                                                        ent_now=0, ent_parts={}, marks=[], msgs_min=0, clip_count=0))
+                                                        ent_now=0, ent_parts={}, marks=[], msgs_min=0, clip_count=0,
+                                                        recent=[]))
+                p = dict(self.presence.get(c["url"]) or {})
+                if p:
+                    p["age"] = round(now - p.get("checked", now))
+                item["presence"] = p
                 chans.append(item)
         shown = dict(self.settings)
         if shown["yt_client_secret"]:
@@ -182,7 +310,8 @@ class Engine:
         yt = dict(configured=bool(self.settings["yt_client_id"] and self.settings["yt_client_secret"]),
                   connected=self.yt.connected())
         return dict(channels=chans, settings=shown, youtube=yt, out=self.cfg.out, model=ac.MODEL,
-                    ffmpeg=not ac.FFMPEG_NOTE, ffmpeg_note=ac.FFMPEG_NOTE)
+                    ffmpeg=not ac.FFMPEG_NOTE, ffmpeg_note=ac.FFMPEG_NOTE,
+                    fonts={k: v for k, v in ac.FONTS.items()})
 
     # -- clips
     def list_clips(self):
@@ -444,6 +573,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(e.list_uploads())
             elif p.startswith("/clips/"):
                 self.serve_clip(urllib.parse.unquote(p[7:]))
+            elif p.startswith("/fonts/") and p[7:] in ac.FONTS.values():
+                with open(os.path.join(ac.fonts_dir(), p[7:]), "rb") as f:
+                    self._send(200, f.read(), "font/ttf")
             else:
                 self._json(dict(error="not found"), 404)
         except Exception as ex:
@@ -460,7 +592,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             d = json.loads(self.rfile.read(n) or b"{}")
             p = self.path
             if p == "/api/channels":
-                e.add_channel(d["url"])
+                e.add_channel(d["url"], d.get("label", ""))
+            elif p == "/api/channels/rename":
+                e.rename_channel(d["url"], d.get("label", ""))
+            elif p == "/api/channels/refresh":
+                e.refresh_presence()
             elif p == "/api/channels/toggle":
                 e.toggle_channel(d["url"], d["enabled"])
             elif p == "/api/channels/remove":

@@ -46,7 +46,8 @@ def main():
 
     sep = os.pathsep
     cmd = [py, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--name", "AutoClipper",
-           "--add-data", f"ui.html{sep}.", "--add-data", f"bundle/models{sep}models"]
+           "--add-data", f"ui.html{sep}.", "--add-data", f"fonts{sep}fonts",
+           "--add-data", f"bundle/models{sep}models"]
     if system in ("Windows", "Darwin"):
         cmd.append("--windowed")
     for pkg in ["streamlink", "yt_dlp", "faster_whisper", "ctranslate2", "onnxruntime", "av", "tokenizers",

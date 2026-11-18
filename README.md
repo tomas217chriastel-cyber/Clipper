@@ -11,6 +11,27 @@ and how suddenly loud the stream audio gets. This catches moments where chat goe
 In **Settings → Clip when…** choose hype spam, entertainment meter, or either (default), and set the trigger level.
 The window updates live (pushed by the app twice a second, no refresh needed).
 
+**What's new in this version**
+- **Every detected moment becomes a clip.** Footage is indexed to the exact second (ffmpeg writes the real
+  length of every recorded piece), copied the moment the after-part is recorded, and kept even if the stream
+  drops or restarts. Clips render one at a time with automatic fallbacks (other encoder, simpler filters),
+  and each trigger line on the graph gets a dot: yellow = in progress, green = saved, grey = failed. The
+  list under each channel shows what happened to every trigger, and why if it failed.
+- **Sharper picture, correct proportions, no blur.** *Settings → Picture in the clip*: fill the frame
+  (crop the sides), bigger picture (4:3 trim + black bars), whole picture (black bars), or the old blurred
+  background. The video is never stretched, is scaled with a sharp filter, and the app now records 1080p
+  when the stream offers it.
+- **Better subtitles.** More accurate Whisper settings (fewer made-up/repeated words, pick the spoken
+  language), Shorts-style word highlight, 6 bundled bold sans-serif fonts (Montserrat, Poppins, Archivo
+  Black, Anton, Bebas Neue), 16 colours + any custom colour for text, highlight and outline, 4 sizes,
+  4 positions, and a live preview.
+- **See who is online immediately.** A quick live check (one request for all Twitch channels) shows within
+  a second or two who is live, how many are watching, what game/category and the stream title - also for
+  paused channels. Live channels move to the top; *↻ Check now* re-checks on demand.
+- **Rename channels.** Give every channel your own name (when adding it, or *✏️ Rename* / double-click
+  the name). The name is used in the app, in clip file names and in suggested titles.
+- Clips tab loads faster (thumbnails instead of loading every video).
+
 The finished app is **self-contained**: Python, ffmpeg, streamlink, yt-dlp, chat clients and the Whisper
 subtitle model are all bundled. Nothing to install on the machine that runs it.
 
