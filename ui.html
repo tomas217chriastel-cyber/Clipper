@@ -109,6 +109,10 @@ h4.sh{margin:24px 0 12px;font-size:12px;color:var(--acc2);text-transform:upperca
   <div class="card"><div class="form">
     <div><label>Sensitivity</label><select id="s_sensitivity"><option value="low">Low – only big moments</option><option value="medium">Medium (recommended)</option><option value="high">High – more clips</option></select>
       <div class="hint">How big a chat spike has to be before a clip is made.</div></div>
+    <div><label>Credit the creator</label><select id="s_credit"><option value="1">On – title “Clip from @creator”, @ in description and caption</option><option value="0">Off – use the suggested title</option></select>
+      <div class="hint">The @ for each channel is shown (and editable) on the Channels tab.</div></div>
+    <div><label>After uploading</label><select id="s_delete_after_upload"><option value="0">Keep the video on this PC</option><option value="1">Delete the video once it is on every platform it was sent to</option></select>
+      <div class="hint">Only after YouTube confirms the upload and the clip is in TikTok (inbox or posted). If anything fails, the video is kept.</div></div>
     <div><label>Upload new clips automatically</label><select id="s_auto_upload"><option value="off">Off – I choose which clips to upload</option>
       <option value="both">To YouTube + TikTok drafts</option><option value="youtube">To YouTube only</option><option value="tiktok">To TikTok drafts only</option></select>
       <div class="hint">Uses your upload defaults (YouTube and TikTok tabs) and each clip's suggested title. Only clips made after you turn it on.</div></div>
@@ -296,6 +300,9 @@ function renderState(s){
       <button class="ghost small ren" title="Rename this channel">✏️ Rename</button><span class="meta slug"></span><span class="plat"></span><span class="st"></span><span class="sp"></span><span class="meta cc"></span>
       <label class="sw" title="Auto-clip this channel"><input type="checkbox" class="tg"><i></i></label><button class="danger small rm">Remove</button></div>
       <div class="pres"></div>
+      <div class="cred meta" style="margin-top:4px"><span class="cv"></span> <button class="ghost small ced" title="Which @accounts get credited in titles and captions">@ Edit credit</button>
+        <span class="cform" hidden>▶ YouTube @<input type="text" class="cyt" style="width:150px;padding:4px 7px"> ♪ TikTok @<input type="text" class="ctt" style="width:150px;padding:4px 7px">
+        <button class="pri small csave">Save</button><button class="ghost small cx">Cancel</button></span></div>
       <div class="ent" hidden><span class="el">🎭 Entertainment</span><div class="eb"><div class="ef"></div><div class="et"></div></div><b class="ev"></b><span class="ep meta"></span></div>
       <canvas></canvas>
       <div class="meta mm" style="margin-top:6px"></div><div class="trg"></div>`;
@@ -306,9 +313,18 @@ function renderState(s){
       const done=save=>{if(!el.dataset.editing)return;delete el.dataset.editing;rn.hidden=true;nm.hidden=false;
         if(save&&rn.value.trim()!==(el.dataset.label||''))api('channels/rename',{url:c.url,label:rn.value}).then(()=>{toast(rn.value.trim()?'Renamed ✓':'Name reset');refresh()}).catch(x=>toast(x.message))};
       el.querySelector('.ren').onclick=edit;nm.ondblclick=edit;
+      const cf=el.querySelector('.cform');
+      el.querySelector('.ced').onclick=()=>{el.dataset.ced='1';cf.hidden=false;el.querySelector('.ced').hidden=true;
+        el.querySelector('.cyt').value=el.dataset.yth||'';el.querySelector('.ctt').value=el.dataset.tth||'';el.querySelector('.cyt').focus()};
+      const cclose=()=>{delete el.dataset.ced;cf.hidden=true;el.querySelector('.ced').hidden=false};
+      el.querySelector('.cx').onclick=cclose;
+      el.querySelector('.csave').onclick=()=>api('channels/handles',{url:c.url,yt:el.querySelector('.cyt').value,tt:el.querySelector('.ctt').value})
+        .then(()=>{cclose();toast('Credit saved ✓');refresh()}).catch(x=>toast(x.message));
       rn.onkeydown=e=>{if(e.key==='Enter')done(true);if(e.key==='Escape')done(false)};rn.onblur=()=>done(true);
       root.appendChild(el)}
     el.dataset.label=c.label||'';el.dataset.disp=c.display||c.name;el.style.order=on?0:1;
+    el.dataset.yth=c.yt_handle||'';el.dataset.tth=c.tt_handle||'';
+    el.querySelector('.cv').textContent=c.yt_handle||c.tt_handle?`Credit: ▶ @${c.yt_handle||'?'} · ♪ @${c.tt_handle||'?'}`+(c.handle_set?'':' (detected – check the TikTok one)'):'Credit: finding the creator’s @…';
     if(!el.dataset.editing)el.querySelector('.name').textContent=c.display||c.name;
     el.querySelector('.slug').textContent=c.label?c.name:'';
     el.querySelector('.dot').classList.toggle('on',on);
@@ -398,8 +414,8 @@ $('#selUp').onclick=()=>openBulk((lastClips||[]).filter(c=>SEL.has(c.name)));
 function openBulk(clips){if(!clips.length)return;if(!window.ST)return;bulkClips=clips;const s=window.ST.settings,yt=window.ST.youtube.connected,tt=window.ST.tiktok&&window.ST.tiktok.connected;
   if(!yt&&!tt){toast('Connect YouTube or TikTok first');document.querySelector('[data-tab=youtube]').click();return}
   const one=clips.length===1;$('#b_head').textContent=one?'Upload this clip':`Upload ${clips.length} clips`;
-  $('#b_titlerow').hidden=!one;$('#b_title').value=one?(clips[0].suggested_title||clips[0].name):'';
-  $('#b_list').innerHTML=one?'':'Titles: each clip uses its own suggested title.<br>'+clips.slice(0,8).map(c=>'• '+esc(c.suggested_title||c.name)).join('<br>')+(clips.length>8?`<br>… and ${clips.length-8} more`:'');
+  $('#b_titlerow').hidden=!one;$('#b_title').value=one?(clips[0].credit_title||clips[0].suggested_title||clips[0].name):'';
+  $('#b_list').innerHTML=one?'':(s.credit?'Titles: “Clip from @creator” for each clip.<br>':'Titles: each clip uses its own suggested title.<br>')+clips.slice(0,8).map(c=>'• '+esc(c.credit_title||c.suggested_title||c.name)).join('<br>')+(clips.length>8?`<br>… and ${clips.length-8} more`:'');
   $('#b_yt').checked=yt;$('#b_yt').disabled=!yt;$('#b_ytnote').textContent=yt?'':'(connect in the YouTube tab first)';
   $('#b_tt').checked=!!tt;$('#b_tt').disabled=!tt;$('#b_ttnote').textContent=tt?'':'(connect in the TikTok tab first)';
   $('#b_privacy').value=s.yt_privacy;$('#b_desc').value=s.yt_description;$('#b_tags').value=s.yt_tags;$('#b_shorts').checked=s.format==='vertical';$('#b_caption').value=s.tt_caption||'';
@@ -417,9 +433,9 @@ $('#b_go').onclick=async()=>{const b={names:bulkClips.map(c=>c.name),youtube:$('
     toast(`${r.queued} upload(s) started`+(r.skipped.length?` · ${r.skipped.length} skipped (already queued or uploaded)`:''));loadUploads()}catch(e){toast(e.message)}};
 
 /* settings */
-const F=['sensitivity','auto_upload','trigger','ent_threshold','use_audio','format','framing','pre','post','subs','model','cooldown','poll','quality','encoder','render_jobs','buffer','hype_words','out',
+const F=['sensitivity','credit','delete_after_upload','auto_upload','trigger','ent_threshold','use_audio','format','framing','pre','post','subs','model','cooldown','poll','quality','encoder','render_jobs','buffer','hype_words','out',
   'sub_style','sub_font','sub_size','sub_position','sub_color','sub_highlight','sub_outline','sub_upper','sub_language'];
-const BOOL=new Set(['subs','use_audio','sub_upper']);
+const BOOL=new Set(['subs','use_audio','sub_upper','credit','delete_after_upload']);
 const PALETTE=['#FFFFFF','#FFE600','#FFC400','#FF8A00','#FF3B30','#FF2D95','#E040FB','#8B5CF6','#3B82F6','#00C2FF','#00E5A8','#22C55E','#A3FF12','#9CA3AF','#111111','#000000'];
 const LANGS=[['auto','Auto-detect'],['en','English'],['cs','Czech'],['sk','Slovak'],['de','German'],['pl','Polish'],['es','Spanish'],['fr','French'],['it','Italian'],['pt','Portuguese'],['nl','Dutch'],['hu','Hungarian'],['ru','Russian'],['uk','Ukrainian'],['tr','Turkish'],['ar','Arabic'],['ja','Japanese'],['ko','Korean'],['zh','Chinese']];
 document.querySelectorAll('.sws').forEach(box=>{const k=box.dataset.k;
@@ -468,7 +484,8 @@ $('#ytdef').onclick=async()=>{const b={};['yt_description','yt_tags','yt_categor
   try{await api('settings',b);toast('Defaults saved');refresh()}catch(e){toast(e.message)}};
 let upClip=null;
 function openUp(c){if(!window.ST||!window.ST.youtube.connected){toast('Connect YouTube first (YouTube tab)');document.querySelector('[data-tab=youtube]').click();return}
-  upClip=c;const s=window.ST.settings;$('#u_title').value=c.suggested_title||c.name;$('#u_desc').value=s.yt_description;$('#u_tags').value=s.yt_tags;
+  upClip=c;const s=window.ST.settings;$('#u_title').value=c.credit_title||c.suggested_title||c.name;
+  $('#u_desc').value=[c.credit_desc||'',s.yt_description||''].filter(Boolean).join('\n\n');$('#u_tags').value=s.yt_tags;
   $('#u_privacy').value=s.yt_privacy;$('#u_category').value=s.yt_category;$('#u_when').value='now';$('#u_at').hidden=true;$('#u_hint').textContent='';
   $('#u_shorts').checked=s.format==='vertical';$('#upm').classList.add('on')}
 $('#u_when').onchange=e=>{const sc=e.target.value==='sched';$('#u_at').hidden=!sc;
@@ -536,7 +553,7 @@ function openTT(c){if(!window.ST||!window.ST.tiktok.connected){toast('Connect Ti
   ttClip=c;ttInfo=null;const s=window.ST.settings,t=window.ST.tiktok;
   $('#t_who').textContent='Posting to TikTok as '+(t.nickname||'your connected account')+(t.username?' (@'+t.username+')':'');
   $('#t_prev').src='/clips/'+encodeURIComponent(c.name)+'.mp4';
-  $('#t_caption').value=[c.suggested_title||'',s.tt_caption||''].filter(Boolean).join('\n\n');
+  $('#t_caption').value=[c.credit_tt||c.suggested_title||'',s.tt_caption||''].filter(Boolean).join('\n\n');
   ['disclose','yours','branded'].forEach(k=>$('#t_'+k).checked=false);$('#t_mode').value=s.tt_mode||'inbox';
   $('#ttm').classList.add('on');ttModeUI()}
 $('#t_x').onclick=()=>{$('#ttm').classList.remove('on');$('#t_prev').pause()};

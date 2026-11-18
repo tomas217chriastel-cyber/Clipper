@@ -35,7 +35,8 @@ DEFAULTS = dict(out="", format="vertical", subs=True, model="small", pre=30, pos
                 sub_color="#FFFFFF", sub_highlight="#FFE600", sub_outline="#000000", sub_upper=True,
                 sub_language="auto",
                 yt_client_id="", yt_client_secret="", yt_description="", yt_tags="", yt_category="20", yt_privacy="private",
-                tt_client_key="", tt_client_secret="", tt_mode="inbox", tt_caption="", auto_upload="off")
+                tt_client_key="", tt_client_secret="", tt_mode="inbox", tt_caption="", auto_upload="off",
+                credit=True, delete_after_upload=False)
 LIMITS = dict(pre=(10, 90), post=(4, 45), cooldown=(15, 600), buffer=(120, 1800), window=(4, 20),
               baseline=(60, 600), sigma=(1, 8), hype_weight=(0, 6), poll=(15, 600), ent_threshold=(30, 98), render_jobs=(1, 4))
 CONFIG_VERSION = 2  # v2: the encoder default became "auto" (GPU when it works, else libx264)
@@ -183,6 +184,7 @@ class Engine:
         if self.settings["subs"]:
             ac.preload_model(self.cfg)
         threading.Thread(target=ac.pick_encoder, args=("auto",), daemon=True).start()  # test the GPU encoder early
+        threading.Thread(target=self._fill_handles, daemon=True).start()  # creator @handles for credits
 
     def _start(self, url, label=""):
         old = self.workers.get(url)
@@ -208,6 +210,66 @@ class Engine:
             self.save()
             self._start(url, label)
         self._pkick.set()  # check right away whether it is live
+        threading.Thread(target=self._fill_handles, daemon=True).start()
+
+    # -- creator @handles (for "Clip from @creator" credits)
+    def _detect_handle(self, url):
+        """The creator's @handle: YouTube channel handle from the stream page, Twitch/Kick channel name."""
+        platform, slug, _ = ac.parse_target(url)
+        if platform != "youtube":
+            return slug
+        m = re.search(r"youtube\.com/@([\w.-]+)", url)
+        if m:
+            return m.group(1)
+        try:
+            import yt_dlp
+
+            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as y:
+                info = y.extract_info(url, download=False, process=False)
+            for v in (info.get("uploader_id"), info.get("channel_url"), info.get("uploader_url")):
+                h = re.search(r"@([\w.-]+)", v or "")
+                if h:
+                    return h.group(1)
+        except Exception as e:
+            ac.log("credit", f"could not read the channel handle of {url}: {str(e)[:120]}")
+        return ""
+
+    def _fill_handles(self):
+        for c in list(self.channels):
+            if c.get("auto_handle"):
+                continue
+            h = self._detect_handle(c["url"])
+            if h:
+                with self.lock:
+                    c["auto_handle"] = h
+                    self.save()
+                ac.log("credit", f"{c.get('label') or c['url']}: creator is @{h}")
+
+    def set_handles(self, url, yt, tt):
+        clean = lambda h: re.sub(r"[^\w.-]", "", str(h or "").strip().lstrip("@"))[:60]  # noqa: E731
+        with self.lock:
+            c = next((c for c in self.channels if c["url"] == url), None)
+            if not c:
+                raise ValueError("Channel not found")
+            for k, v in (("yt_handle", clean(yt)), ("tt_handle", clean(tt))):
+                if v:
+                    c[k] = v
+                else:
+                    c.pop(k, None)
+            self.save()
+
+    def handles_for(self, source_url):
+        """(youtube_handle, tiktok_handle, display_name) for the channel a clip came from."""
+        c = next((c for c in self.channels if c["url"] == source_url), None) or {}
+        yt = c.get("yt_handle") or c.get("auto_handle") or ""
+        return yt, c.get("tt_handle") or yt, c.get("label") or ""
+
+    def credit(self, meta):
+        """Title / description line / TikTok caption line in the 'Clip from @creator' pattern."""
+        yt, tt, label = self.handles_for(meta.get("source", ""))
+        who_yt = f"@{yt}" if yt else (label or meta.get("label") or meta.get("channel", ""))
+        who_tt = f"@{tt}" if tt else who_yt
+        return f"Clip from {who_yt}"[:100], f"Clip from {who_yt}", f"Clip from {who_tt}"
 
     def rename_channel(self, url, label):
         label = clean_label(label)
@@ -318,8 +380,10 @@ class Engine:
             for c in self.channels:
                 platform, slug, name = ac.parse_target(c["url"])
                 w = self.workers.get(c["url"])
+                yt_h, tt_h, _ = self.handles_for(c["url"])
                 item = dict(url=c["url"], enabled=c.get("enabled", True), name=name, platform=platform,
-                            label=c.get("label", ""), display=c.get("label") or name)
+                            label=c.get("label", ""), display=c.get("label") or name, yt_handle=yt_h, tt_handle=tt_h,
+                            handle_set=bool(c.get("yt_handle") or c.get("tt_handle")))
                 item.update(w.snapshot() if w else dict(status="stopped", live=False, score=[], hype=[], ent=[],
                                                         ent_now=0, ent_parts={}, marks=[], msgs_min=0, clip_count=0,
                                                         recent=[]))
@@ -355,6 +419,8 @@ class Engine:
             except (OSError, ValueError):
                 continue
             m["name"] = name
+            if self.settings["credit"]:
+                m["credit_title"], m["credit_desc"], m["credit_tt"] = self.credit(m)
             m["size_mb"] = round(os.path.getsize(mp4) / 1e6, 1)
             m.setdefault("detected_ts", os.path.getmtime(mp4))
             items.append(m)
@@ -567,6 +633,8 @@ class Engine:
                     pass
                 ac.log("tiktok", f"{it['name']}: " + ("in your TikTok inbox - open the TikTok app to post it"
                                                      if st == "SEND_TO_USER_INBOX" else "posted on TikTok"))
+                self._save_uploads()
+                self._maybe_cleanup(it["name"])
             elif st == "FAILED":
                 why = d.get("fail_reason", "")
                 it.update(status="error", error="TikTok: " + tiktok.FAIL_REASONS.get(why, why or "processing failed"))
@@ -669,23 +737,67 @@ class Engine:
         queued, skipped = 0, []
         for name in names:
             m = self._clip_meta(name)
-            title = (one_title or m.get("suggested_title") or m.get("label") or name).strip()[:100]
+            c_title, c_desc, c_tt = self.credit(m) if s["credit"] else ("", "", "")
+            title = (one_title or c_title or m.get("suggested_title") or m.get("label") or name).strip()[:100]
+            targets = set(m.get("targets") or [])
             if to_yt:
+                desc = d.get("description", s["yt_description"]) or ""
+                if c_desc and c_desc.lower() not in desc.lower():
+                    desc = (c_desc + "\n\n" + desc).strip()
                 try:
-                    self.enqueue_upload(dict(name=name, title=title, description=d.get("description", s["yt_description"]),
+                    self.enqueue_upload(dict(name=name, title=title, description=desc,
                                              tags=d.get("tags", s["yt_tags"]), privacy=d.get("privacy", s["yt_privacy"]),
                                              category=s["yt_category"], shorts=d.get("shorts", s["format"] == "vertical")))
                     queued += 1
+                    targets.add("youtube")
                 except (ValueError, OSError) as e:
                     skipped.append(f"YouTube · {name}: {e}")
             if to_tt:
-                extra = d.get("caption", s["tt_caption"]) or ""
+                extra = (d.get("caption", s["tt_caption"]) or "").strip()
+                first = c_tt if c_tt else title
+                if one_title and c_tt and one_title != c_title:
+                    first = one_title + "\n" + c_tt  # own title typed in the dialog + the credit line
                 try:
-                    self.enqueue_tiktok(dict(name=name, mode="inbox", caption="\n\n".join(x for x in (title, extra.strip()) if x)))
+                    self.enqueue_tiktok(dict(name=name, mode="inbox", caption="\n\n".join(x for x in (first, extra) if x)))
                     queued += 1
+                    targets.add("tiktok")
                 except (ValueError, OSError) as e:
                     skipped.append(f"TikTok · {name}: {e}")
+            if targets and m:
+                m["targets"] = sorted(targets)  # where this clip must be before it may be deleted from the PC
+                self._write_meta(name, m)
         return dict(queued=queued, skipped=skipped)
+
+    def _write_meta(self, name, m):
+        with open(self._clip_path(name, ".json"), "w", encoding="utf8") as f:
+            json.dump(m, f, ensure_ascii=False)
+
+    def _maybe_cleanup(self, name):
+        """Settings 'Delete the video from this PC after uploading': once the clip is confirmed on every platform
+        it was sent to (YouTube uploaded, TikTok in the inbox / posted), the video file is deleted. Never earlier."""
+        if not self.settings.get("delete_after_upload"):
+            return
+        m = self._clip_meta(name)
+        targets = set(m.get("targets") or [])
+        if not targets or m.get("deleted"):
+            return
+        ok = set()
+        for u in self._uploads_copy():
+            if u["name"] != name or u["status"] != "done":
+                continue
+            plat = u.get("platform", "youtube")
+            if plat == "youtube" or u.get("tt_status") in ("SEND_TO_USER_INBOX", "PUBLISH_COMPLETE"):
+                ok.add(plat)
+        if not targets <= ok:
+            return
+        for ext in (".mp4", ".png"):
+            try:
+                os.remove(self._clip_path(name, ext))
+            except OSError:
+                pass
+        m.update(deleted=True, deleted_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+        self._write_meta(name, m)  # the small .json stays as a record of what was posted
+        ac.log("upload", f"{name}: uploaded to {' + '.join(sorted(targets))} - video deleted from this PC")
 
     def _auto_loop(self):
         """Settings 'Upload new clips automatically': queues every new clip as soon as it is saved."""
@@ -702,14 +814,18 @@ class Engine:
                 for c in self.list_clips():
                     if c.get("auto_queued") or float(c.get("detected_ts") or 0) < self._auto_since:
                         continue
-                    want_yt = mode in ("youtube", "both") and self.yt.connected()
-                    want_tt = mode in ("tiktok", "both") and self.tt.connected()
-                    if want_yt or want_tt:
-                        r = self.queue_many(dict(names=[c["name"]], youtube=want_yt, tiktok=want_tt))
-                        ac.log("upload", f"auto-upload {c['name']}: {r['queued']} queued"
-                               + (f", skipped: {'; '.join(r['skipped'])}" if r["skipped"] else ""))
-                    else:
-                        ac.log("upload", f"auto-upload {c['name']} skipped: connect YouTube/TikTok first")
+                    want_yt, want_tt = mode in ("youtube", "both"), mode in ("tiktok", "both")
+                    missing = [n for n, w, ok in (("YouTube", want_yt, self.yt.connected()),
+                                                  ("TikTok", want_tt, self.tt.connected())) if w and not ok]
+                    if missing:  # wait (the clip stays pending) instead of uploading to only one platform
+                        if time.time() - getattr(self, "_auto_warned", 0) > 600:
+                            self._auto_warned = time.time()
+                            ac.log("upload", f"auto-upload waiting: connect {' and '.join(missing)} first "
+                                             f"(new clips are kept and uploaded once connected)")
+                        continue
+                    r = self.queue_many(dict(names=[c["name"]], youtube=want_yt, tiktok=want_tt))
+                    ac.log("upload", f"auto-upload {c['name']}: {r['queued']} queued"
+                           + (f", skipped: {'; '.join(r['skipped'])}" if r["skipped"] else ""))
                     m = self._clip_meta(c["name"])
                     m["auto_queued"] = True
                     with open(self._clip_path(c["name"], ".json"), "w", encoding="utf8") as f:
@@ -761,6 +877,8 @@ class Engine:
                 except Exception:
                     pass
                 ac.log("youtube", f"uploaded {item['name']} -> https://youtu.be/{vid}")
+                self._save_uploads()
+                self._maybe_cleanup(item["name"])
             except Exception as e:
                 item.update(status="cancelled" if item.get("cancel") else "error", error=str(e))
                 ac.log("youtube", f"upload failed for {item['name']}: {e}")
@@ -853,6 +971,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 e.add_channel(d["url"], d.get("label", ""))
             elif p == "/api/channels/rename":
                 e.rename_channel(d["url"], d.get("label", ""))
+            elif p == "/api/channels/handles":
+                e.set_handles(d["url"], d.get("yt", ""), d.get("tt", ""))
             elif p == "/api/channels/refresh":
                 e.refresh_presence()
             elif p == "/api/channels/toggle":
