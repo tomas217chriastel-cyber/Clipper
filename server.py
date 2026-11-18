@@ -27,10 +27,12 @@ PRESETS = {
 DEFAULTS = dict(out="", format="vertical", subs=True, model="small", pre=30, post=12, sensitivity="medium",
                 cooldown=60, quality="720p60,720p,best", encoder="libx264", hype_words="", buffer=300,
                 window=8, baseline=120, sigma=3.0, hype_weight=2.0, poll=60,
+                trigger="both", ent_threshold=70, use_audio=True,
                 yt_client_id="", yt_client_secret="", yt_description="", yt_tags="", yt_category="20", yt_privacy="private")
 LIMITS = dict(pre=(10, 90), post=(4, 45), cooldown=(15, 600), buffer=(120, 1800), window=(4, 20),
-              baseline=(60, 600), sigma=(1, 8), hype_weight=(0, 6), poll=(15, 600))
+              baseline=(60, 600), sigma=(1, 8), hype_weight=(0, 6), poll=(15, 600), ent_threshold=(30, 98))
 CHOICES = dict(format=("vertical", "horizontal"), sensitivity=tuple(PRESETS),
+               trigger=("hype", "entertainment", "both"),
                model=("tiny", "base", "small", "medium"),
                encoder=("libx264", "h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_amf"),
                yt_privacy=("private", "unlisted", "public"),
@@ -80,7 +82,7 @@ class Engine:
     def apply(self):
         s, c = self.settings, self.cfg
         for k in ("format", "model", "pre", "post", "cooldown", "quality", "encoder", "buffer", "window",
-                  "baseline", "sigma", "hype_weight", "poll"):
+                  "baseline", "sigma", "hype_weight", "poll", "trigger", "ent_threshold", "use_audio"):
             setattr(c, k, s[k])
         for k, v in PRESETS.get(s["sensitivity"], PRESETS["medium"]).items():
             setattr(c, k, v)
@@ -171,8 +173,8 @@ class Engine:
                 platform, slug, name = ac.parse_target(c["url"])
                 w = self.workers.get(c["url"])
                 item = dict(url=c["url"], enabled=c.get("enabled", True), name=name, platform=platform)
-                item.update(w.snapshot() if w else dict(status="stopped", live=False, score=[], hype=[],
-                                                        marks=[], msgs_min=0, clip_count=0))
+                item.update(w.snapshot() if w else dict(status="stopped", live=False, score=[], hype=[], ent=[],
+                                                        ent_now=0, ent_parts={}, marks=[], msgs_min=0, clip_count=0))
                 chans.append(item)
         shown = dict(self.settings)
         if shown["yt_client_secret"]:
@@ -201,6 +203,17 @@ class Engine:
             items.append(m)
         items.sort(key=lambda m: m["detected_ts"], reverse=True)
         return items
+
+    def clips_signature(self):
+        sig = []
+        for p in glob.glob(os.path.join(self.cfg.out, "*.*")):
+            if p.endswith((".json", ".mp4")):
+                try:
+                    st = os.stat(p)
+                    sig.append((p, st.st_mtime_ns, st.st_size))
+                except OSError:
+                    pass
+        return sorted(sig)
 
     def _clip_path(self, name, ext):
         if not SAFE_NAME.match(name):
@@ -423,6 +436,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(e.list_clips())
             elif p == "/api/logs":
                 self._json(e.logs(int(q.get("since", ["0"])[0])))
+            elif p == "/api/live":
+                self.live_stream(int(q.get("since", ["0"])[0]))
             elif p == "/oauth/callback":
                 self.oauth_callback(q)
             elif p == "/api/uploads":
@@ -484,6 +499,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(dict(error=str(ex)), 400)
         except Exception as ex:
             self._json(dict(error=str(ex)), 500)
+
+    def live_stream(self, log_seq):
+        """Server-Sent Events: pushes channel state, new log lines, clips and uploads the moment they change."""
+        e = self.engine
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        clip_sig = up_sig = None
+        tick = 0
+
+        def push(name, obj):
+            self.wfile.write(f"event: {name}\ndata: {json.dumps(obj)}\n\n".encode())
+
+        try:
+            while True:
+                if tick % 2 == 0:  # every 0.5 s
+                    push("state", e.state())
+                lg = e.logs(log_seq)
+                if lg["lines"]:
+                    log_seq = lg["seq"]
+                    push("log", lg)
+                if tick % 4 == 0:  # every second
+                    sig = e.clips_signature()
+                    if sig != clip_sig:
+                        clip_sig = sig
+                        push("clips", e.list_clips())
+                    ups = e.list_uploads()
+                    s = json.dumps(ups)
+                    if s != up_sig:
+                        up_sig = s
+                        push("uploads", ups)
+                self.wfile.flush()
+                tick += 1
+                time.sleep(0.25)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass  # window closed / reloaded
 
     def oauth_callback(self, q):
         try:

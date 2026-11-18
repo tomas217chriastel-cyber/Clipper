@@ -8,9 +8,11 @@ so a frozen (PyInstaller) build needs nothing installed on the user's machine.
 """
 from __future__ import annotations
 
+import array
 import collections
 import glob
 import json
+import math
 import os
 import random
 import re
@@ -163,26 +165,115 @@ def hype_tokens(text):
     return toks
 
 
+ANY_EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF☀-➿]")
+PUNCT_RE = re.compile(r"[!?]{2,}")
+
+
+def is_reaction(text, toks):
+    """A message that *reacts* to something: hype words, SHOUTING, '!!!' / '???', or emoji."""
+    if toks or PUNCT_RE.search(text) or ANY_EMOJI_RE.search(text):
+        return True
+    letters = [c for c in text if c.isalpha()]
+    return len(letters) >= 4 and sum(c.isupper() for c in letters) / len(letters) > 0.7
+
+
+# Entertainment meter: how much is going on right now, 0-100. Mixes four signals:
+ENT_WIN = 5            # seconds of chat looked at for each point of the meter
+ENT_LAG = SEG + 3      # audio of a segment is known only once the segment is finished
+ENT_WEIGHTS = dict(activity=0.35, crowd=0.20, reaction=0.25, audio=0.20)
+
+
+def _clamp(x):
+    return 0.0 if x < 0 else 1.0 if x > 1 else x
+
+
 class Meter:
-    """Per-second engagement buckets + spike detector."""
+    """Per-second engagement buckets + spike detector + entertainment meter."""
 
     def __init__(self, cfg):
         self.cfg = cfg
         self.lock = threading.Lock()
-        self.sec = {}  # second -> [msgs, hype_msgs, set(users)]
+        self.sec = {}  # second -> [msgs, hype_msgs, set(users), reaction_msgs]
         self.emo = {}  # second -> Counter(hype tokens)
+        self.aud = {}  # second -> stream audio loudness in dBFS
+        self.ent_cache = {}  # second -> final entertainment value (audio already known)
         self.t0 = time.time()
 
     def add(self, user, text):
         toks = hype_tokens(text)
+        react = is_reaction(text, toks)
         s = int(time.time())
         with self.lock:
-            b = self.sec.setdefault(s, [0, 0, set()])
+            b = self.sec.setdefault(s, [0, 0, set(), 0])
             b[0] += 1
             b[1] += 1 if toks else 0
             b[2].add(user)
+            b[3] += 1 if react else 0
             if toks:
                 self.emo.setdefault(s, collections.Counter()).update(toks)
+
+    def add_audio(self, s, db):
+        with self.lock:
+            self.aud[s] = db
+            for k in [k for k in self.ent_cache if k >= s]:  # recompute with the new audio
+                del self.ent_cache[k]
+
+    # -- entertainment meter
+    def _ent_parts(self, s):
+        """Components (0..1) of the entertainment meter at second s. Caller holds the lock."""
+        c = self.cfg
+        win = range(s - ENT_WIN + 1, s + 1)
+        lo = max(s - ENT_WIN - int(c.baseline) + 1, int(self.t0))  # only time we were actually watching chat
+        if s - ENT_WIN + 1 - lo < 30:
+            return {}  # warming up: no idea yet what "normal" looks like for this stream
+        bs = [self.sec[k][0] if k in self.sec else 0 for k in range(lo, s - ENT_WIN + 1)]
+        base = max(statistics.fmean(bs), 0.3)  # typical msgs/sec before this moment
+        msgs = sum(self.sec[k][0] for k in win if k in self.sec)
+        users = len(set().union(*[self.sec[k][2] for k in win if k in self.sec]))
+        react = sum(self.sec[k][3] for k in win if k in self.sec)
+        expect = base * ENT_WIN
+        parts = dict(
+            activity=_clamp((msgs / expect - 1) / 3),        # 4x the usual chat speed = full
+            crowd=_clamp((users / expect - 0.8) / 2.2),      # many *different* people, not one spammer
+            reaction=_clamp((react / msgs) / 0.6) * _clamp(msgs / 6) if msgs else 0.0,
+        )
+        # chat reacts a few seconds after the stream gets loud, so look at audio slightly earlier too
+        loud = [self.aud[k] for k in range(s - 4, s + 1) if k in self.aud]
+        if c.use_audio and loud:
+            hist = sorted(v for k, v in self.aud.items() if lo <= k < s - 4)
+            if len(hist) >= 20:
+                parts["audio"] = _clamp((max(loud) - hist[len(hist) // 2] - 3) / 9)  # +12 dB over usual = full
+        return parts
+
+    def ent(self, s, final_before=None):
+        """Entertainment value 0-100 for second s."""
+        with self.lock:
+            if s in self.ent_cache:
+                return self.ent_cache[s]
+            p = self._ent_parts(s)
+            w = sum(ENT_WEIGHTS[k] for k in p)
+            v = int(round(100 * sum(ENT_WEIGHTS[k] * x for k, x in p.items()) / w)) if w else 0
+            if final_before is not None and s <= final_before:
+                self.ent_cache[s] = v
+            return v
+
+    def ent_parts(self, s):
+        with self.lock:
+            return {k: round(v, 2) for k, v in self._ent_parts(s).items()}
+
+    def check_ent(self, now):
+        """Entertainment-meter trigger, evaluated ENT_LAG seconds behind so stream audio is known."""
+        c = self.cfg
+        if time.time() - self.t0 < 45 + ENT_LAG + ENT_WIN:
+            return None
+        e = now - ENT_LAG
+        vals = [self.ent(s, final_before=e) for s in range(e - 2, e + 1)]
+        with self.lock:
+            msgs = sum(self.sec[k][0] for k in range(e - ENT_WIN + 1, e + 1) if k in self.sec)
+        # sustained: the newest second over the line, the two before it close to it
+        if vals[-1] >= c.ent_threshold and min(vals) >= c.ent_threshold * 0.85 and msgs >= c.min_users:
+            return dict(at=e, entertainment=vals[-1], threshold=c.ent_threshold, parts=self.ent_parts(e))
+        return None
 
     def score(self, s):
         b = self.sec.get(s)
@@ -198,7 +289,7 @@ class Meter:
 
     def prune(self, now):
         with self.lock:
-            for d in (self.sec, self.emo):
+            for d in (self.sec, self.emo, self.aud, self.ent_cache):
                 for k in [k for k in d if k < now - 1500]:
                     del d[k]
 
@@ -468,6 +559,46 @@ def list_segs(d):
     return sorted((seg_start(p), p) for p in glob.glob(os.path.join(d, "seg_*.ts")))
 
 
+AUDIO_RATE = 8000
+
+
+def segment_loudness(path):
+    """Per-second loudness (dBFS) of a finished segment's audio track."""
+    r = subprocess.run([FFMPEG, "-nostdin", "-loglevel", "error", "-i", path, "-vn", "-ac", "1",
+                        "-ar", str(AUDIO_RATE), "-f", "s16le", "-"], capture_output=True, timeout=30, **popen_kw())
+    pcm = array.array("h")
+    pcm.frombytes(r.stdout[: len(r.stdout) // 2 * 2])
+    if sys.byteorder == "big":
+        pcm.byteswap()
+    out = []
+    for i in range(0, len(pcm) - AUDIO_RATE // 2 + 1, AUDIO_RATE):  # ignore a trailing half-second
+        chunk = pcm[i:i + AUDIO_RATE]
+        rms = math.sqrt(sum(x * x for x in chunk) / len(chunk))
+        out.append(20 * math.log10(max(rms, 1.0) / 32768))
+    return out
+
+
+def audio_watch(seg_dir, meter, stop):
+    """Feeds the entertainment meter with how loud the stream is (shouting, screaming, explosions...)."""
+    done = set()
+    warned = False
+    while not stop.wait(2):
+        segs = list_segs(seg_dir)
+        for st, p in segs[:-1]:  # the newest segment is still being written
+            if p in done:
+                continue
+            done.add(p)
+            try:
+                for i, db in enumerate(segment_loudness(p)):
+                    meter.add_audio(int(st) + i, db)
+            except Exception as e:
+                if not warned:
+                    log("audio", f"loudness unavailable, meter uses chat only: {e}")
+                    warned = True
+        live = {p for _, p in segs}
+        done &= live
+
+
 # --------------------------------------------------------------------------- subtitles + render
 
 _model, _model_name, _mlock = None, None, threading.Lock()
@@ -654,23 +785,34 @@ class Worker(threading.Thread):
         shutil.rmtree(self.seg_dir, ignore_errors=True)
         os.makedirs(self.seg_dir)
         self.meter = Meter(cfg)
+        self.trigs = []
         stop_s = threading.Event()
         self.start_chat(stop_s, src)
         rec = Recorder(src, self.seg_dir)
         rec.start()
+        threading.Thread(target=audio_watch, args=(self.seg_dir, self.meter, stop_s), daemon=True).start()
         last_trig = 0.0
         try:
             while not self.stop.is_set() and rec.alive():
                 time.sleep(1)
                 now = int(time.time()) - 1
                 self.meter.prune(now)
-                if time.time() - last_trig >= cfg.cooldown:
+                mode = getattr(cfg, "trigger", "both")
+                hit = trig = None
+                if time.time() - last_trig >= cfg.cooldown and mode in ("hype", "both"):
                     hit = self.meter.check(now)
                     if hit:
-                        last_trig = time.time()
-                        self.trigs.append(last_trig)
-                        log(self.name, f"SPIKE detected {hit}")
-                        threading.Thread(target=self.clip, args=(last_trig, hit, self.meter), daemon=True).start()
+                        hit["reason"], trig = "hype", time.time()
+                if not hit and mode in ("entertainment", "both"):
+                    h = self.meter.check_ent(now)  # always evaluated, so the meter's history stays cached
+                    if h and time.time() - last_trig >= cfg.cooldown and h["at"] + 1 > last_trig:
+                        hit, trig = h, float(h.pop("at") + 1)
+                        hit["reason"] = "entertainment"
+                if hit:
+                    last_trig = time.time()
+                    self.trigs.append((trig, hit["reason"]))
+                    log(self.name, f"{'SPIKE' if hit['reason'] == 'hype' else 'ENTERTAINMENT'} detected {hit}")
+                    threading.Thread(target=self.clip, args=(trig, hit, self.meter), daemon=True).start()
                 if now % 60 == 0:
                     n = sum(self.meter.msgs(s) for s in range(now - 59, now + 1))
                     log(self.name, f"chat: {n} msgs/min")
@@ -713,9 +855,10 @@ class Worker(threading.Thread):
             title = (text[:70].rsplit(" ", 1)[0] if len(text) > 20 else f"{self.name} chat goes wild {' '.join(emotes[:1])}").strip()
             meta = dict(channel=self.name, platform=self.platform, source=self.url,
                         detected_at=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trig)),
-                        detected_ts=trig, spike=hit, top_emotes=emotes, transcript=text,
-                        suggested_title=title, uploaded=False,
+                        detected_ts=trig, spike=hit, reason=hit.get("reason", "hype"), top_emotes=emotes,
+                        transcript=text, suggested_title=title, uploaded=False,
                         series=dict(start=a, score=[meter.score(s) for s in rng], hype=[meter.hype(s) for s in rng],
+                                    ent=[meter.ent(s) for s in rng],
                                     trig=int(trig) - a, clip_start=int(t0) - a, clip_end=int(t1) - a))
             with open(os.path.join(cfg.out, name + ".json"), "w", encoding="utf8") as f:
                 json.dump(meta, f, ensure_ascii=False)
@@ -729,8 +872,12 @@ class Worker(threading.Thread):
     def snapshot(self):
         m, now, N = self.meter, int(time.time()), 300
         rng = range(now - N + 1, now + 1)
+        on = bool(m and self.live)
+        ent = [m.ent(s, final_before=now - ENT_LAG) for s in rng] if on else []
         return dict(live=self.live, status=self.status, clip_count=self.clip_count,
-                    score=[m.score(s) for s in rng] if m and self.live else [],
-                    hype=[m.hype(s) for s in rng] if m and self.live else [],
-                    msgs_min=sum(m.msgs(s) for s in range(now - 59, now + 1)) if m and self.live else 0,
-                    marks=[int(t - (now - N + 1)) for t in self.trigs if now - N + 1 <= t <= now])
+                    score=[m.score(s) for s in rng] if on else [],
+                    hype=[m.hype(s) for s in rng] if on else [],
+                    ent=ent, ent_now=ent[-1] if ent else 0, ent_parts=m.ent_parts(now) if on else {},
+                    ent_threshold=self.cfg.ent_threshold, trigger=self.cfg.trigger,
+                    msgs_min=sum(m.msgs(s) for s in range(now - 59, now + 1)) if on else 0,
+                    marks=[[int(t - (now - N + 1)), r] for t, r in self.trigs if now - N + 1 <= t <= now])

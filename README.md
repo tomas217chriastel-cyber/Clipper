@@ -2,8 +2,14 @@
 
 Hands-free clipper for **Twitch, Kick and YouTube** live streams. Paste channel links, leave the app open.
 It waits for the stream to go live, records a rolling buffer, watches live chat, and when chat explodes
-(XD / KEKW / LUL / LMAO / 💀 spam) it cuts **30s before the spike + 12s after**, adds subtitles and saves an MP4.
-You only upload the finished clips to YouTube.
+(XD / KEKW / LUL / LMAO / 💀 spam) **or** the entertainment meter jumps, it cuts **30s before the spike + 12s after**,
+adds subtitles and saves an MP4. You only upload the finished clips to YouTube.
+
+**Entertainment meter (0–100)** — the cyan line on each channel. It mixes chat speed vs. normal for that stream,
+how many *different* people are talking, how many messages are reactions (CAPS, `!!!`, `???`, emoji, hype words)
+and how suddenly loud the stream audio gets. This catches moments where chat goes crazy without spamming XD.
+In **Settings → Clip when…** choose hype spam, entertainment meter, or either (default), and set the trigger level.
+The window updates live (pushed by the app twice a second, no refresh needed).
 
 The finished app is **self-contained**: Python, ffmpeg, streamlink, yt-dlp, chat clients and the Whisper
 subtitle model are all bundled. Nothing to install on the machine that runs it.
