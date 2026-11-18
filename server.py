@@ -58,6 +58,11 @@ SECRETS = ("yt_client_secret", "tt_client_secret")
 SAFE_NAME = re.compile(r"^[\w@.-]+$")
 
 
+def _real_secret(v):
+    """A saved secret that is not empty and not dots copied from a hidden field."""
+    return bool(v) and "•" not in str(v)
+
+
 def clean_label(s):
     s = re.sub(r"[\x00-\x1f\x7f]+", " ", str(s or "")).strip()
     return re.sub(r"\s+", " ", s)[:60]
@@ -127,8 +132,13 @@ class Engine:
         with self.lock:
             old_model, old_subs, old_jobs = self.settings["model"], self.settings["subs"], self.settings["render_jobs"]
             for k, v in new.items():
-                if k not in DEFAULTS or (k in SECRETS and str(v).startswith(MASK)):
+                if k not in DEFAULTS:
                     continue
+                if k in SECRETS and "•" in str(v):
+                    if str(v).strip("•") or not _real_secret(self.settings.get(k)):
+                        raise ValueError("That secret is the hidden version (dots). In the developer portal click the "
+                                         "eye icon next to the secret to show it, then copy and paste the real one.")
+                    continue  # the masked placeholder the UI shows for an already saved secret
                 d = DEFAULTS[k]
                 if isinstance(d, bool):
                     v = bool(v)
@@ -416,6 +426,8 @@ class Engine:
         s = self.settings
         if not (s["yt_client_id"] and s["yt_client_secret"]):
             raise ValueError("Save your Google Client ID and Client Secret first")
+        if not _real_secret(s["yt_client_secret"]):
+            raise ValueError("The saved Google Client secret is only dots - copy the real one and paste it again")
         url = self.yt.auth_url(s["yt_client_id"], f"http://127.0.0.1:{port}/oauth/callback")
         try:
             webbrowser.open(url)
@@ -435,6 +447,9 @@ class Engine:
         key, secret = self._tt_keys()
         if not (key and secret):
             raise ValueError("Save your TikTok Client key and Client secret first")
+        if not _real_secret(secret):
+            raise ValueError("The saved TikTok Client secret is only dots (copied while hidden). Show it with the eye "
+                             "icon in the developer portal, copy it, select everything in the Client secret box and paste.")
         url = self.tt.auth_url(key, f"http://127.0.0.1:{port}{tiktok.REDIRECT_PATH}")
         try:
             webbrowser.open(url)
