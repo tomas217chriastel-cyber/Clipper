@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import autoclipper as ac
+import tiktok
 import youtube
 
 PRESETS = {
@@ -33,7 +34,8 @@ DEFAULTS = dict(out="", format="vertical", subs=True, model="small", pre=30, pos
                 sub_style="karaoke", sub_font=ac.DEFAULT_FONT, sub_size="large", sub_position="lower",
                 sub_color="#FFFFFF", sub_highlight="#FFE600", sub_outline="#000000", sub_upper=True,
                 sub_language="auto",
-                yt_client_id="", yt_client_secret="", yt_description="", yt_tags="", yt_category="20", yt_privacy="private")
+                yt_client_id="", yt_client_secret="", yt_description="", yt_tags="", yt_category="20", yt_privacy="private",
+                tt_client_key="", tt_client_secret="", tt_mode="inbox", tt_caption="")
 LIMITS = dict(pre=(10, 90), post=(4, 45), cooldown=(15, 600), buffer=(120, 1800), window=(4, 20),
               baseline=(60, 600), sigma=(1, 8), hype_weight=(0, 6), poll=(15, 600), ent_threshold=(30, 98), render_jobs=(1, 4))
 CONFIG_VERSION = 2  # v2: the encoder default became "auto" (GPU when it works, else libx264)
@@ -46,10 +48,13 @@ CHOICES = dict(format=("vertical", "horizontal"), sensitivity=tuple(PRESETS),
                model=("tiny", "base", "small", "medium"),
                encoder=("auto", "libx264", "h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_amf"),
                yt_privacy=("private", "unlisted", "public"),
+               tt_mode=("inbox", "direct"),
                yt_category=("1", "10", "17", "20", "22", "23", "24", "25"))
 MASK = "\u2022\u2022\u2022\u2022\u2022\u2022"
 OPEN_OK = ("https://studio.youtube.com/", "https://youtu.be/", "https://www.youtube.com/",
-           "https://console.cloud.google.com/", "https://accounts.google.com/")
+           "https://console.cloud.google.com/", "https://accounts.google.com/",
+           "https://developers.tiktok.com/", "https://www.tiktok.com/")
+SECRETS = ("yt_client_secret", "tt_client_secret")
 SAFE_NAME = re.compile(r"^[\w@.-]+$")
 
 
@@ -78,6 +83,7 @@ class Engine:
         self._load()
         self.apply()
         self.yt = youtube.YouTube(self.dir)
+        self.tt = tiktok.TikTok(self.dir)
         self.uploads = []
         self.uploads_path = os.path.join(self.dir, "uploads.json")
         self._load_uploads()
@@ -121,7 +127,7 @@ class Engine:
         with self.lock:
             old_model, old_subs, old_jobs = self.settings["model"], self.settings["subs"], self.settings["render_jobs"]
             for k, v in new.items():
-                if k not in DEFAULTS or (k == "yt_client_secret" and str(v).startswith(MASK)):
+                if k not in DEFAULTS or (k in SECRETS and str(v).startswith(MASK)):
                     continue
                 d = DEFAULTS[k]
                 if isinstance(d, bool):
@@ -310,11 +316,14 @@ class Engine:
                 item["presence"] = p
                 chans.append(item)
         shown = dict(self.settings)
-        if shown["yt_client_secret"]:
-            shown["yt_client_secret"] = MASK
+        for k in SECRETS:
+            if shown[k]:
+                shown[k] = MASK
         yt = dict(configured=bool(self.settings["yt_client_id"] and self.settings["yt_client_secret"]),
                   connected=self.yt.connected())
-        return dict(channels=chans, settings=shown, youtube=yt, out=self.cfg.out, model=ac.MODEL,
+        tt = dict(configured=bool(self.settings["tt_client_key"] and self.settings["tt_client_secret"]),
+                  connected=self.tt.connected(), **self.tt.account())
+        return dict(channels=chans, settings=shown, youtube=yt, tiktok=tt, out=self.cfg.out, model=ac.MODEL,
                     ffmpeg=not ac.FFMPEG_NOTE, ffmpeg_note=ac.FFMPEG_NOTE, encoder_auto=ac.AUTO_ENCODER,
                     render_queue=ac.RENDER_SLOTS.status(),
                     fonts={k: v for k, v in ac.FONTS.items()})
@@ -418,6 +427,125 @@ class Engine:
         self.yt.finish(code, state, self.settings["yt_client_id"], self.settings["yt_client_secret"])
         ac.log("youtube", "account connected")
 
+    # -- TikTok
+    def _tt_keys(self):
+        return self.settings["tt_client_key"], self.settings["tt_client_secret"]
+
+    def tt_connect(self, port):
+        key, secret = self._tt_keys()
+        if not (key and secret):
+            raise ValueError("Save your TikTok Client key and Client secret first")
+        url = self.tt.auth_url(key, f"http://127.0.0.1:{port}{tiktok.REDIRECT_PATH}")
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        return url
+
+    def tt_finish(self, code, state):
+        self.tt.finish(code, state, *self._tt_keys())
+        ac.log("tiktok", f"account connected ({self.tt.account()['nickname'] or 'TikTok'})")
+
+    def tt_disconnect(self):
+        self.tt.disconnect(*self._tt_keys())
+
+    def tt_creator(self):
+        """Who will post + what TikTok allows right now (asked fresh each time the post window opens)."""
+        if not self.tt.connected():
+            raise ValueError("Connect your TikTok account first (TikTok tab)")
+        return self.tt.creator_info(*self._tt_keys())
+
+    def enqueue_tiktok(self, d):
+        if not self.tt.connected():
+            raise ValueError("Connect your TikTok account first (TikTok tab)")
+        name = str(d.get("name", ""))
+        mp4 = self._clip_path(name, ".mp4")
+        if not os.path.exists(mp4):
+            raise ValueError("Clip file not found")
+        mode = d.get("mode") if d.get("mode") in CHOICES["tt_mode"] else "inbox"
+        caption = str(d.get("caption", "")).strip()
+        if len(caption.encode("utf-16-le")) // 2 > 2200:
+            raise ValueError("TikTok captions can be at most 2200 characters")
+        item = dict(id=uuid.uuid4().hex[:8], platform="tiktok", name=name, title=caption.splitlines()[0][:100] if caption
+                    else name, caption=caption, mode=mode, status="queued", progress=0, video_id="", error="",
+                    created=time.time(), privacy="drafts" if mode == "inbox" else "")
+        if mode == "direct":
+            if not d.get("consent"):
+                raise ValueError("Please confirm TikTok's Music Usage Confirmation first")
+            privacy = d.get("privacy")
+            info = self.tt_creator()  # re-checked right before posting, as TikTok requires
+            if privacy not in (info.get("privacy_level_options") or []):
+                raise ValueError("Choose who can see this video")
+            maxd = info.get("max_video_post_duration_sec") or 0
+            try:
+                with open(self._clip_path(name, ".json"), encoding="utf8") as f:
+                    dur = float(json.load(f).get("duration") or 0)
+            except (OSError, ValueError):
+                dur = 0
+            if maxd and dur > maxd:
+                raise ValueError(f"This clip is {dur:.0f}s but this TikTok account can post at most {maxd}s")
+            yours, branded = bool(d.get("brand_organic")), bool(d.get("brand_content"))
+            if d.get("disclose") and not (yours or branded):
+                raise ValueError("Commercial content is on - choose 'Your brand' and/or 'Branded content'")
+            if branded and privacy == "SELF_ONLY":
+                raise ValueError("Branded content cannot be private on TikTok")
+            post = dict(title=caption, privacy_level=privacy,
+                        disable_comment=info.get("comment_disabled") or not d.get("allow_comment"),
+                        disable_duet=info.get("duet_disabled") or not d.get("allow_duet"),
+                        disable_stitch=info.get("stitch_disabled") or not d.get("allow_stitch"),
+                        brand_organic_toggle=bool(d.get("disclose") and yours),
+                        brand_content_toggle=bool(d.get("disclose") and branded))
+            item.update(post_info=post, privacy=privacy.replace("_", " ").lower())
+        with self.lock:
+            if any(u["name"] == name and u.get("platform") == "tiktok" and u["status"] in ("queued", "uploading", "processing", "done")
+                   for u in self.uploads):
+                raise ValueError("This clip is already queued or sent to TikTok")
+            self.uploads.append(item)
+        self._save_uploads()
+
+    def _tiktok_item(self, item):
+        path = self._clip_path(item["name"], ".mp4")
+        ac.log("tiktok", f"sending {item['name']} ({'drafts' if item['mode'] == 'inbox' else 'direct post'}) ...")
+
+        def prog(p, it=item):
+            it["progress"] = p
+
+        pid = self.tt.upload(*self._tt_keys(), path, item["mode"], item.get("post_info"), prog,
+                             lambda it=item: it.get("cancel"))
+        item.update(status="processing", publish_id=pid, progress=100, error="", next_check=time.time() + 10)
+        ac.log("tiktok", f"uploaded {item['name']}; TikTok is processing it")
+
+    def _tiktok_poll(self):
+        """Follows TikTok's processing until the draft is in the inbox / the post is live (or it failed)."""
+        now = time.time()
+        for it in [u for u in self.uploads if u.get("platform") == "tiktok" and u["status"] == "processing"
+                   and u.get("next_check", 0) <= now]:
+            it["next_check"] = now + 15
+            try:
+                d = self.tt.status(*self._tt_keys(), it["publish_id"])
+            except Exception as e:
+                it["checks"] = it.get("checks", 0) + 1
+                if it["checks"] > 40:
+                    it.update(status="error", error=f"lost track of the TikTok post: {e}")
+                continue
+            st = d.get("status", "")
+            if st in ("SEND_TO_USER_INBOX", "PUBLISH_COMPLETE"):
+                ids = d.get("publicaly_available_post_id") or []
+                it.update(status="done", tt_status=st, video_id=str(ids[0]) if ids else "")
+                try:
+                    self.mark_clip(it["name"], True)
+                except Exception:
+                    pass
+                ac.log("tiktok", f"{it['name']}: " + ("in your TikTok inbox - open the TikTok app to post it"
+                                                     if st == "SEND_TO_USER_INBOX" else "posted on TikTok"))
+            elif st == "FAILED":
+                why = d.get("fail_reason", "")
+                it.update(status="error", error="TikTok: " + tiktok.FAIL_REASONS.get(why, why or "processing failed"))
+                ac.log("tiktok", f"{it['name']} failed: {it['error']}")
+            elif now - it.get("created", now) > 6 * 3600:
+                it.update(status="done", tt_status="PROCESSING", error="")  # stop polling; TikTok keeps going
+            self._save_uploads()
+
     def enqueue_upload(self, d):
         if not self.yt.connected():
             raise ValueError("Connect your YouTube account first (YouTube tab)")
@@ -445,7 +573,8 @@ class Engine:
             publish_at = when.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         category = str(d.get("category") or self.settings["yt_category"])
         with self.lock:
-            if any(u["name"] == name and u["status"] in ("queued", "uploading", "done") for u in self.uploads):
+            if any(u["name"] == name and u.get("platform", "youtube") == "youtube"
+                   and u["status"] in ("queued", "uploading", "done") for u in self.uploads):
                 raise ValueError("This clip is already queued or uploaded")
             self.uploads.append(dict(id=uuid.uuid4().hex[:8], name=name, title=title, description=desc, tags=tags,
                                      privacy=privacy, publish_at=publish_at, category=category, status="queued",
@@ -489,11 +618,23 @@ class Engine:
     def _upload_loop(self):
         while True:
             time.sleep(2)
+            try:
+                self._tiktok_poll()
+            except Exception as e:
+                ac.log("tiktok", f"status check failed: {e}")
             with self.lock:
                 item = next((u for u in self.uploads if u["status"] == "queued"), None)
                 if item:
                     item["status"], item["progress"] = "uploading", 0
             if not item:
+                continue
+            if item.get("platform") == "tiktok":
+                try:
+                    self._tiktok_item(item)
+                except Exception as e:
+                    item.update(status="cancelled" if item.get("cancel") else "error", error=str(e))
+                    ac.log("tiktok", f"upload failed for {item['name']}: {e}")
+                self._save_uploads()
                 continue
             try:
                 path = self._clip_path(item["name"], ".mp4")
@@ -575,6 +716,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.live_stream(int(q.get("since", ["0"])[0]))
             elif p == "/oauth/callback":
                 self.oauth_callback(q)
+            elif p in (tiktok.REDIRECT_PATH, tiktok.REDIRECT_PATH.rstrip("/")):
+                self.oauth_callback(q, tt=True)
+            elif p == "/api/tiktok/creator":
+                try:
+                    self._json(e.tt_creator())
+                except (ValueError, tiktok.TikTokError) as ex:
+                    self._json(dict(error=str(ex)), 400)
             elif p == "/api/uploads":
                 self._json(e.list_uploads())
             elif p.startswith("/clips/"):
@@ -617,6 +765,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json(dict(ok=True, url=e.yt_connect(self.server.server_address[1])))
             elif p == "/api/youtube/disconnect":
                 e.yt.disconnect()
+            elif p == "/api/tiktok/connect":
+                return self._json(dict(ok=True, url=e.tt_connect(self.server.server_address[1])))
+            elif p == "/api/tiktok/disconnect":
+                e.tt_disconnect()
+            elif p == "/api/tiktok/uploads":
+                e.enqueue_tiktok(d)
             elif p == "/api/uploads":
                 e.enqueue_upload(d)
             elif p == "/api/uploads/cancel":
@@ -637,7 +791,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 return self._json(dict(error="not found"), 404)
             self._json(dict(ok=True))
-        except (ValueError, KeyError, youtube.YouTubeError) as ex:
+        except (ValueError, KeyError, youtube.YouTubeError, tiktok.TikTokError) as ex:
             self._json(dict(error=str(ex)), 400)
         except Exception as ex:
             self._json(dict(error=str(ex)), 500)
@@ -681,12 +835,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass  # window closed / reloaded
 
-    def oauth_callback(self, q):
+    def oauth_callback(self, q, tt=False):
+        who = "TikTok" if tt else "Google"
         try:
             if q.get("error"):
-                raise ValueError("Google said: " + q["error"][0])
-            self.engine.yt_finish(q["code"][0], q["state"][0])
-            msg, color = "YouTube connected \u2713 &mdash; you can close this tab and return to AutoClipper.", "#34d399"
+                raise ValueError(f"{who} said: " + (q.get("error_description") or q["error"])[0])
+            (self.engine.tt_finish if tt else self.engine.yt_finish)(q["code"][0], q["state"][0])
+            msg, color = ("TikTok" if tt else "YouTube") + \
+                " connected \u2713 &mdash; you can close this tab and return to AutoClipper.", "#34d399"
         except Exception as ex:
             msg, color = "Could not connect: " + str(ex).replace("<", "&lt;"), "#ff5d6c"
         page = ("<!doctype html><meta charset=utf-8><title>AutoClipper</title><body style=\"background:#0f1115;"

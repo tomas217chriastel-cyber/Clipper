@@ -12,7 +12,7 @@ nav button.on{background:var(--panel2);color:var(--tx)}nav button:hover{color:va
 .right{display:flex;gap:8px;align-items:center}
 button.ghost,button.pri,button.danger{border-radius:8px;padding:7px 12px;font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--tx)}
 button.pri{background:var(--acc);border-color:var(--acc)}button.pri:hover{background:#7c4be8}button.ghost:hover{border-color:#3a4152}
-button.danger{color:var(--hot)}button.small{padding:4px 9px;font-size:12px}
+button.danger{color:var(--hot)}button:disabled{opacity:.45;cursor:not-allowed}code{background:var(--panel2);padding:1px 6px;border-radius:5px;font-size:12px}button.small{padding:4px 9px;font-size:12px}
 main{max-width:1120px;margin:0 auto;padding:22px}
 .pill{font-size:12px;padding:3px 9px;border-radius:20px;background:var(--panel2);color:var(--mut)}
 .pill.ok{color:var(--ok)}.pill.warn{color:var(--warn)}
@@ -81,6 +81,7 @@ h4.sh{margin:24px 0 12px;font-size:12px;color:var(--acc2);text-transform:upperca
     <button data-tab="channels" class="on">Channels</button>
     <button data-tab="clips">Clips<span id="cnt" class="badge" hidden></span></button>
     <button data-tab="youtube">YouTube</button>
+    <button data-tab="tiktok">TikTok</button>
     <button data-tab="settings">Settings</button>
     <button data-tab="log">Log</button>
   </nav>
@@ -172,7 +173,28 @@ h4.sh{margin:24px 0 12px;font-size:12px;color:var(--acc2);text-transform:upperca
     <div class="row" style="margin-top:12px"><button class="pri" id="ytdef">Save defaults</button></div></div>
   <div class="card"><b>Upload queue &amp; schedule</b>
     <div class="hint">In the Clips tab press “▶ YouTube” on a clip, write the title/description, choose when it goes live, and it uploads automatically in the background.</div>
-    <div id="uq"></div><div class="empty" id="uqempty" hidden>Nothing queued yet.</div></div>
+    <div class="uq"></div><div class="empty uqempty" hidden>Nothing queued yet.</div></div>
+</section>
+
+<section id="t-tiktok" hidden>
+  <div class="card"><div class="row"><b>TikTok account</b><span class="sp"></span><span id="ttstat" class="pill"></span></div>
+    <div class="hint" style="margin:8px 0 10px">One-time setup (about 10 minutes). TikTok requires you to create your own free developer app:
+      <ol class="steps"><li>Open the TikTok developer portal, log in and click <b>Manage apps → Connect an app</b>. Choose platform <b>Desktop</b>.</li>
+      <li>Add the products <b>Login Kit</b> and <b>Content Posting API</b> (turn on <b>Direct Post</b> if you want to post without the TikTok app).</li>
+      <li>In Login Kit add this redirect URI exactly: <code id="ttredir">http://127.0.0.1:*/tiktok/callback/</code> <button class="ghost small" id="ttcopy">Copy</button></li>
+      <li>Add your own TikTok account under <b>Sandbox → Target users</b> (or submit the app for review), then copy the <b>Client key</b> and <b>Client secret</b> below.</li></ol></div>
+    <div class="form"><div><label>Client key</label><input type="text" id="s_tt_client_key" autocomplete="off"></div>
+      <div><label>Client secret</label><input type="text" id="s_tt_client_secret" autocomplete="off"></div></div>
+    <div class="row" style="margin-top:12px"><button class="pri" id="ttconnect">Save &amp; connect TikTok</button>
+      <button class="ghost" id="ttdisc">Disconnect</button><button class="ghost small" id="ttportal">Open TikTok developer portal</button></div></div>
+  <div class="card"><b>Posting defaults</b><div class="form" style="margin-top:10px">
+    <div><label>How clips go to TikTok</label><select id="s_tt_mode"><option value="inbox">Send to my TikTok drafts (recommended)</option><option value="direct">Post directly to my profile</option></select>
+      <div class="hint">Drafts: TikTok notifies you in the app, you tap it, check and post. Works right away.<br>Direct: posts without opening TikTok. Until TikTok reviews your developer app, direct posts can only be “Only me”.</div></div>
+    <div><label>Default caption / hashtags</label><textarea id="s_tt_caption" rows="3" placeholder="#fyp #gaming #clips"></textarea></div></div>
+    <div class="row" style="margin-top:12px"><button class="pri" id="ttdef">Save defaults</button></div></div>
+  <div class="card"><b>Upload queue</b>
+    <div class="hint">In the Clips tab press “♪ TikTok” on a clip. It uploads in the background; progress shows here.</div>
+    <div class="uq"></div><div class="empty uqempty" hidden>Nothing queued yet.</div></div>
 </section>
 
 <section id="t-log" hidden><pre id="logbox"></pre></section>
@@ -187,6 +209,24 @@ h4.sh{margin:24px 0 12px;font-size:12px;color:var(--acc2);text-transform:upperca
     <input type="datetime-local" id="u_at" hidden style="margin-top:8px"><div class="hint" id="u_hint"></div></div>
   <label class="row" style="cursor:pointer;color:var(--tx);font-size:13px"><input type="checkbox" id="u_shorts"> Add #Shorts (for vertical clips under 60 seconds)</label>
   <div class="row" style="margin-top:16px"><button class="pri" id="u_go">Add to upload queue</button><button class="ghost" id="u_x">Cancel</button></div></div></div>
+<div class="modal" id="ttm"><div class="mbox"><h3 style="margin:0 0 6px">Send to TikTok</h3>
+  <div class="meta" id="t_who" style="margin-bottom:12px"></div>
+  <video id="t_prev" controls preload="metadata" style="width:100%;max-height:260px;background:#000;border-radius:8px;margin-bottom:12px"></video>
+  <div class="f"><label>How</label><select id="t_mode"><option value="inbox">Send to my TikTok drafts – finish posting in the TikTok app</option><option value="direct">Post directly to my profile</option></select></div>
+  <div class="f"><label>Caption (hashtags and @mentions work)</label><textarea id="t_caption" rows="4" maxlength="2200"></textarea></div>
+  <div id="t_direct" hidden>
+    <div class="f"><label>Who can see this video</label><select id="t_privacy"></select></div>
+    <div class="f"><label>Allow viewers to</label><div class="row" style="gap:16px;flex-wrap:wrap">
+      <label class="row" style="gap:6px"><input type="checkbox" id="t_comment"> Comment</label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="t_duet"> Duet</label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="t_stitch"> Stitch</label></div></div>
+    <div class="f"><label class="row" style="gap:6px;color:var(--tx)"><input type="checkbox" id="t_disclose"> This video promotes a brand, product or service (commercial content)</label>
+      <div id="t_brands" hidden style="margin:6px 0 0 22px"><label class="row" style="gap:6px"><input type="checkbox" id="t_yours"> Your brand – promoting yourself or your own business</label>
+        <label class="row" style="gap:6px"><input type="checkbox" id="t_branded"> Branded content – paid partnership with a third party</label></div></div>
+    <div class="hint" id="t_consent"></div>
+  </div>
+  <div class="hint" id="t_hint"></div>
+  <div class="row" style="margin-top:16px"><button class="pri" id="t_go">Send to TikTok</button><button class="ghost" id="t_x">Cancel</button></div></div></div>
 <div id="toast"></div>
 <script>
 const $=s=>document.querySelector(s);
@@ -196,7 +236,7 @@ function toast(t){const e=$('#toast');e.textContent=t;e.style.display='block';cl
 let tab='channels';
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));
-  ['channels','clips','youtube','settings','log'].forEach(t=>$('#t-'+t).hidden=t!==tab);if(tab==='clips')loadClips();if(tab==='settings')fillSettings();if(tab==='youtube')ytFill()});
+  ['channels','clips','youtube','tiktok','settings','log'].forEach(t=>$('#t-'+t).hidden=t!==tab);if(tab==='clips')loadClips();if(tab==='settings')fillSettings();if(tab==='youtube')ytFill();if(tab==='tiktok')ttFill()});
 
 const ENTC='#22d3ee',MARKC={hype:'#ff5d6c',entertainment:ENTC};
 function draw(cv,score,hype,o={}){const dpr=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;if(!w)return;
@@ -283,7 +323,8 @@ function renderState(s){
   $('#enchint').textContent=ea.state==='checked'?'Auto: '+ea.note:'Auto checks your graphics card when the app starts.';
   $('#rqhint').textContent='More at once = clips from busy moments are ready sooner, but the PC works harder.'+
     (rq.rendering||rq.queued?`  Now: ${rq.rendering} rendering, ${rq.queued} waiting.`:'');
-  window.OUT=s.out;window.ST=s;if(window.wasConn===false&&s.youtube.connected)toast('YouTube connected ✓');window.wasConn=s.youtube.connected;if(tab==='youtube')ytStat()}
+  window.OUT=s.out;window.ST=s;if(window.wasConn===false&&s.youtube.connected)toast('YouTube connected ✓');window.wasConn=s.youtube.connected;if(tab==='youtube')ytStat();
+  if(s.tiktok){if(window.wasTT===false&&s.tiktok.connected)toast('TikTok connected ✓');window.wasTT=s.tiktok.connected;if(tab==='tiktok')ttStat()}}
 $('#add').onclick=async()=>{const u=$('#url').value.trim();if(!u)return;try{await api('channels',{url:u,label:$('#label').value});$('#url').value='';$('#label').value='';refresh()}catch(e){toast(e.message)}};
 $('#url').onkeydown=$('#label').onkeydown=e=>e.key==='Enter'&&$('#add').click();
 $('#recheck').onclick=()=>api('channels/refresh',{}).then(()=>toast('Checking who is live…')).catch(e=>toast(e.message));
@@ -310,11 +351,11 @@ function renderClips(list){lastClips=list;
       const q=encodeURIComponent(c.name);
       el.innerHTML=`<video controls preload="none" poster="/clips/${q}.png" src="/clips/${q}.mp4"></video><div class="b">
         <div class="title"></div><div class="meta">${esc(c.label||c.channel)} · ${c.detected_at} · ${c.duration?c.duration+'s · ':''}${c.size_mb} MB</div>${ex}<canvas></canvas>
-        <div class="acts"><button class="ghost small cp">Copy title</button><button class="pri small yt">▶ YouTube</button><button class="ghost small rv">Show file</button>
+        <div class="acts"><button class="ghost small cp">Copy title</button><button class="pri small yt">▶ YouTube</button><button class="pri small tt">♪ TikTok</button><button class="ghost small rv">Show file</button>
         <label><input type="checkbox" class="up"> uploaded</label><span class="sp"></span><button class="danger small dl">Delete</button></div></div>`;
       el.querySelector('.title').textContent=c.suggested_title||c.name;
       el.querySelector('.cp').onclick=()=>navigator.clipboard.writeText(c.suggested_title||c.name).then(()=>toast('Title copied'));
-      el.querySelector('.rv').onclick=()=>api('reveal',{name:c.name});el.querySelector('.yt').onclick=()=>openUp(c);
+      el.querySelector('.rv').onclick=()=>api('reveal',{name:c.name});el.querySelector('.yt').onclick=()=>openUp(c);el.querySelector('.tt').onclick=()=>openTT(c);
       el.querySelector('.up').onchange=e=>{api('clips/mark',{name:c.name,uploaded:e.target.checked});el.classList.toggle('done',e.target.checked)};
       el.querySelector('.dl').onclick=()=>confirm('Delete this clip permanently?')&&api('clips/delete',{name:c.name}).then(loadClips);
       const s=c.series;if(s)requestAnimationFrame(()=>draw(el.querySelector('canvas'),s.score,s.hype,{marks:[[s.trig,c.reason||'hype']],band:[s.clip_start,s.clip_end],ent:s.ent}));
@@ -388,18 +429,69 @@ $('#u_go').onclick=async()=>{const b={name:upClip.name,title:$('#u_title').value
   try{await api('uploads',b);$('#upm').classList.remove('on');toast('Added to the upload queue');loadUploads()}catch(e){toast(e.message)}};
 async function loadUploads(){let l;try{l=await api('uploads')}catch(e){return}renderUploads(l)}
 function renderUploads(l){
-  $('#uqempty').hidden=l.length>0;
-  $('#uq').innerHTML=l.map(u=>{const when=u.publish_at?'🗓 publishes '+new Date(u.publish_at).toLocaleString():u.privacy;
-    const st=u.status==='uploading'?'uploading '+u.progress+'%':u.status;
-    return `<div class="row" data-id="${u.id}" style="padding:10px 0;border-top:1px solid var(--line)"><div class="sp"><div class="title">${esc(u.title)}</div>
-      <div class="meta">${esc(u.name)} · ${when}${u.error?' · <span style="color:var(--hot)">'+esc(u.error)+'</span>':''}</div></div>
+  document.querySelectorAll('.uqempty').forEach(e=>e.hidden=l.length>0);
+  const html=l.map(u=>{const tt=u.platform==='tiktok';
+    const when=tt?(u.mode==='inbox'?'TikTok drafts':'TikTok · '+(u.privacy||'')):u.publish_at?'🗓 publishes '+new Date(u.publish_at).toLocaleString():u.privacy;
+    const st=u.status==='uploading'?'uploading '+u.progress+'%':u.status==='processing'?'TikTok is processing…':
+      tt&&u.status==='done'?(u.tt_status==='SEND_TO_USER_INBOX'?'in your TikTok inbox – open TikTok to post':u.tt_status==='PROCESSING'?'sent (still processing)':'posted'):u.status;
+    return `<div class="row" data-id="${u.id}" style="padding:10px 0;border-top:1px solid var(--line)"><div class="sp"><div class="title">${tt?'♪ ':'▶ '}${esc(u.title)}</div>
+      <div class="meta">${esc(u.name)} · ${esc(when)}${u.error?' · <span style="color:var(--hot)">'+esc(u.error)+'</span>':''}</div></div>
       <span class="pill ${u.status==='done'?'ok':u.status==='error'?'warn':''}">${st}</span>
-      ${u.status==='done'?`<button class="ghost small" data-a="open" data-v="${esc(u.video_id)}">Open in Studio</button>`:''}
+      ${u.status==='done'&&!tt?`<button class="ghost small" data-a="open" data-v="${esc(u.video_id)}">Open in Studio</button>`:''}
       ${u.status==='error'||u.status==='cancelled'?'<button class="ghost small" data-a="retry">Retry</button>':''}
       ${u.status==='queued'||u.status==='uploading'?'<button class="ghost small" data-a="cancel">Cancel</button>':''}
-      ${u.status!=='uploading'?'<button class="danger small" data-a="remove">Remove</button>':''}</div>`}).join('')}
-$('#uq').onclick=e=>{const b=e.target.closest('button');if(!b)return;const id=b.closest('[data-id]').dataset.id,a=b.dataset.a;
-  if(a==='open')api('open',{url:'https://studio.youtube.com/video/'+b.dataset.v+'/edit'});else api('uploads/'+a,{id}).then(loadUploads)};
+      ${u.status!=='uploading'?'<button class="danger small" data-a="remove">Remove</button>':''}</div>`}).join('');
+  document.querySelectorAll('.uq').forEach(e=>e.innerHTML=html)}
+document.querySelectorAll('.uq').forEach(q=>q.onclick=e=>{const b=e.target.closest('button');if(!b)return;const id=b.closest('[data-id]').dataset.id,a=b.dataset.a;
+  if(a==='open')api('open',{url:'https://studio.youtube.com/video/'+b.dataset.v+'/edit'});else api('uploads/'+a,{id}).then(loadUploads)});
+
+/* tiktok */
+const TF=['tt_client_key','tt_client_secret','tt_mode','tt_caption'];
+const TTPRIV={PUBLIC_TO_EVERYONE:'Everyone',MUTUAL_FOLLOW_FRIENDS:'Friends (followers you follow back)',FOLLOWER_OF_CREATOR:'Followers',SELF_ONLY:'Only me'};
+function ttStat(){const t=window.ST.tiktok,p=$('#ttstat');p.className='pill '+(t.connected?'ok':'warn');
+  p.textContent=t.connected?'Connected'+(t.nickname?' as '+t.nickname:''):t.configured?'Not connected':'Setup needed'}
+function ttFill(){if(!window.ST)return;TF.forEach(k=>$('#s_'+k).value=window.ST.settings[k]);ttStat();loadUploads()}
+$('#ttcopy').onclick=()=>navigator.clipboard.writeText($('#ttredir').textContent).then(()=>toast('Redirect URI copied'));
+$('#ttportal').onclick=()=>api('open',{url:'https://developers.tiktok.com/apps/'});
+$('#ttconnect').onclick=async()=>{try{await api('settings',{tt_client_key:$('#s_tt_client_key').value,tt_client_secret:$('#s_tt_client_secret').value});
+  window.wasTT=false;await api('tiktok/connect',{});toast('Finish the TikTok login in your browser…')}catch(e){toast(e.message)}};
+$('#ttdisc').onclick=()=>confirm('Disconnect TikTok?')&&api('tiktok/disconnect',{}).then(()=>{window.wasTT=undefined;refresh()});
+$('#ttdef').onclick=async()=>{try{await api('settings',{tt_mode:$('#s_tt_mode').value,tt_caption:$('#s_tt_caption').value});toast('Defaults saved');refresh()}catch(e){toast(e.message)}};
+let ttClip=null,ttInfo=null;
+function ttModeUI(){const d=$('#t_mode').value==='direct';$('#t_direct').hidden=!d;
+  $('#t_hint').textContent=d?'TikTok may take a few minutes to process the video before it appears on your profile.':
+    'The clip is uploaded to your TikTok inbox. Open the notification in the TikTok app to edit and post it. (TikTok allows 5 unfinished drafts per 24 h.)';
+  if(d&&!ttInfo)loadCreator();ttCheck()}
+async function loadCreator(){$('#t_privacy').innerHTML='<option value="">Loading…</option>';
+  try{ttInfo=await api('tiktok/creator')}catch(e){ttInfo=null;$('#t_privacy').innerHTML='';$('#t_hint').textContent='Cannot post directly right now: '+e.message;ttCheck();return}
+  $('#t_who').textContent='Posting to TikTok as '+(ttInfo.creator_nickname||'')+(ttInfo.creator_username?' (@'+ttInfo.creator_username+')':'');
+  $('#t_privacy').innerHTML='<option value="">Choose who can see it…</option>'+(ttInfo.privacy_level_options||[]).map(v=>`<option value="${v}">${TTPRIV[v]||v}</option>`).join('');
+  [['comment','comment_disabled'],['duet','duet_disabled'],['stitch','stitch_disabled']].forEach(([k,f])=>{const c=$('#t_'+k);c.checked=false;c.disabled=!!ttInfo[f];
+    c.parentElement.style.opacity=ttInfo[f]?.45:1;c.parentElement.title=ttInfo[f]?'Turned off in this account\'s TikTok settings':''});
+  const mx=ttInfo.max_video_post_duration_sec;if(mx&&ttClip.duration>mx)$('#t_hint').textContent=`This clip is ${Math.round(ttClip.duration)}s – this account can post at most ${mx}s.`;ttCheck()}
+function ttCheck(){const d=$('#t_mode').value==='direct',dis=$('#t_disclose').checked,yours=$('#t_yours').checked,br=$('#t_branded').checked;
+  $('#t_brands').hidden=!dis;
+  const so=$('#t_privacy').querySelector('option[value=SELF_ONLY]');if(so){so.disabled=br;if(br&&$('#t_privacy').value==='SELF_ONLY')$('#t_privacy').value=''}
+  const music='<a href="#" data-u="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en">Music Usage Confirmation</a>',
+    bc='<a href="#" data-u="https://www.tiktok.com/legal/page/global/bc-policy/en">Branded Content Policy</a>';
+  $('#t_consent').innerHTML='By posting, you agree to TikTok\'s '+(dis&&br?bc+' and ':'')+music+'.'+
+    (dis&&(yours||br)?` Your video will be labeled “${br?'Paid partnership':'Promotional content'}”.`:'');
+  $('#t_go').disabled=d&&(!ttInfo||!$('#t_privacy').value||(dis&&!yours&&!br));
+  $('#t_go').textContent=d?'Post to TikTok':'Send to TikTok drafts'}
+$('#t_consent').onclick=e=>{const a=e.target.closest('a');if(a){e.preventDefault();api('open',{url:a.dataset.u})}};
+['t_privacy','t_disclose','t_yours','t_branded'].forEach(i=>$('#'+i).onchange=ttCheck);$('#t_mode').onchange=ttModeUI;
+function openTT(c){if(!window.ST||!window.ST.tiktok.connected){toast('Connect TikTok first (TikTok tab)');document.querySelector('[data-tab=tiktok]').click();return}
+  ttClip=c;ttInfo=null;const s=window.ST.settings,t=window.ST.tiktok;
+  $('#t_who').textContent='Posting to TikTok as '+(t.nickname||'your connected account')+(t.username?' (@'+t.username+')':'');
+  $('#t_prev').src='/clips/'+encodeURIComponent(c.name)+'.mp4';
+  $('#t_caption').value=[c.suggested_title||'',s.tt_caption||''].filter(Boolean).join('\n\n');
+  ['disclose','yours','branded'].forEach(k=>$('#t_'+k).checked=false);$('#t_mode').value=s.tt_mode||'inbox';
+  $('#ttm').classList.add('on');ttModeUI()}
+$('#t_x').onclick=()=>{$('#ttm').classList.remove('on');$('#t_prev').pause()};
+$('#t_go').onclick=async()=>{const b={name:ttClip.name,mode:$('#t_mode').value,caption:$('#t_caption').value};
+  if(b.mode==='direct')Object.assign(b,{privacy:$('#t_privacy').value,allow_comment:$('#t_comment').checked,allow_duet:$('#t_duet').checked,
+    allow_stitch:$('#t_stitch').checked,disclose:$('#t_disclose').checked,brand_organic:$('#t_yours').checked,brand_content:$('#t_branded').checked,consent:true});
+  try{await api('tiktok/uploads',b);$('#ttm').classList.remove('on');$('#t_prev').pause();toast('Sending to TikTok in the background…');loadUploads()}catch(e){toast(e.message)}};
 /* log */
 let seq=0;
 function appendLog(j){if(!j.lines.length||j.seq<=seq)return;const b=$('#logbox'),atEnd=b.scrollTop+b.clientHeight>=b.scrollHeight-30;
@@ -410,7 +502,7 @@ async function pollLog(){try{appendLog(await api('logs?since='+seq))}catch(e){}}
    If that connection drops, fall back to polling until it reconnects. */
 let polls=[];
 function startPolling(){if(polls.length)return;refresh();loadClips();pollLog();
-  polls=[setInterval(refresh,2000),setInterval(loadClips,5000),setInterval(pollLog,2000),setInterval(()=>{if(tab==='youtube')loadUploads()},3000)]}
+  polls=[setInterval(refresh,2000),setInterval(loadClips,5000),setInterval(pollLog,2000),setInterval(()=>{if(tab==='youtube'||tab==='tiktok')loadUploads()},3000)]}
 function stopPolling(){polls.forEach(clearInterval);polls=[]}
 function connectLive(){
   if(!window.EventSource){startPolling();return}

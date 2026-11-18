@@ -93,6 +93,29 @@ Good to know:
 - The app stores your Client ID/secret and login token only on your PC (`config.json`, `youtube_token.json` in the app data folder).
 - Uploads are marked "not made for kids". Check YouTube's reused-content/monetization rules for clips.
 
+## TikTok
+
+Connect once in the **TikTok** tab, then press **♪ TikTok** on a clip. Two ways:
+- **Send to my TikTok drafts** (default, works right away): the clip lands in your TikTok inbox; open the
+  notification in the TikTok app, check it and post. TikTok allows 5 unfinished drafts per 24 hours.
+- **Post directly**: posts without opening TikTok. Until TikTok reviews (audits) your developer app, direct posts
+  can only be "Only me" and the TikTok account must be private.
+
+One-time setup (TikTok requires your own free developer app):
+1. https://developers.tiktok.com → *Manage apps* → *Connect an app*, platform **Desktop**.
+2. Add **Login Kit** and **Content Posting API** (enable *Direct Post* for direct posting).
+3. Login Kit redirect URI: `http://127.0.0.1:*/tiktok/callback/`
+4. Add your TikTok account as a sandbox target user (or submit the app for review), copy **Client key** + **Client secret**.
+5. AutoClipper → **TikTok** tab → paste both → **Save & connect TikTok** → log in.
+
+Logins last 180 days. Keys and the login token stay on your PC (`config.json`, `tiktok_token.json`).
+
+## Faster rendering
+
+*Settings → Advanced → Clips rendered at the same time* (default 2). The **Auto** video encoder uses the
+graphics card (NVIDIA NVENC / Intel QSV / AMD AMF) when it works and falls back to the CPU otherwise; the
+setting shows what it picked. NVIDIA needs a recent driver.
+
 ## Notes
 - Kick uses Kick's unofficial chat/API; if Kick changes it, Kick chat may need an update.
 - Subtitles run on your CPU/GPU; with `small`, a 40s clip takes roughly 20–60s on a normal PC.
