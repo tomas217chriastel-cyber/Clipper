@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import array
 import collections
+import contextlib
 import html as _html
 import json
 import math
@@ -889,15 +890,25 @@ def model_ref(name):
     return name  # faster-whisper downloads it on first use
 
 
+def render_jobs(cfg):
+    return max(1, min(4, int(getattr(cfg, "render_jobs", 1) or 1)))
+
+
 def get_model(cfg):
+    """One Whisper model with one worker per parallel render, so several clips transcribe at the same time.
+    The CPU cores are shared out between the workers instead of all fighting over the same ones."""
     global _model, _model_name
+    jobs = render_jobs(cfg)
+    key = (cfg.model, jobs)
     with _mlock:
-        if _model is None or _model_name != cfg.model:
+        if _model is None or _model_name != key:
             from faster_whisper import WhisperModel
 
+            phys = max(1, (os.cpu_count() or 4) // 2)
             _model = WhisperModel(model_ref(cfg.model), device="auto", compute_type="auto",
+                                  cpu_threads=max(2, phys // jobs), num_workers=jobs,
                                   download_root=os.path.join(data_dir(), "models"))
-            _model_name = cfg.model
+            _model_name = key
         return _model
 
 
@@ -928,19 +939,19 @@ def clean_words(words):
 def transcribe(cfg, wav):
     model = get_model(cfg)
     lang = getattr(cfg, "sub_language", "auto") or "auto"
-    with _mlock:
-        segs, _ = model.transcribe(
-            wav, language=None if lang == "auto" else lang, word_timestamps=True,
-            vad_filter=True, vad_parameters=dict(min_silence_duration_ms=400, speech_pad_ms=200),
-            beam_size=5, best_of=5, condition_on_previous_text=False)  # no repeated/hallucinated lines
-        words = []
-        for s in segs:
-            if s.no_speech_prob > 0.7 and s.avg_logprob < -0.8:  # "words" heard in music/noise
-                continue
-            for w in s.words or []:
-                t = w.word.strip()
-                if t and (getattr(w, "probability", None) is None or w.probability >= 0.15):
-                    words.append((w.start, w.end, t))
+    # no lock here: the model has a worker per render slot, so parallel clips transcribe in parallel
+    segs, _ = model.transcribe(
+        wav, language=None if lang == "auto" else lang, word_timestamps=True,
+        vad_filter=True, vad_parameters=dict(min_silence_duration_ms=400, speech_pad_ms=200),
+        beam_size=5, best_of=5, condition_on_previous_text=False)  # no repeated/hallucinated lines
+    words = []
+    for s in segs:
+        if s.no_speech_prob > 0.7 and s.avg_logprob < -0.8:  # "words" heard in music/noise
+            continue
+        for w in s.words or []:
+            t = w.word.strip()
+            if t and (getattr(w, "probability", None) is None or w.probability >= 0.15):
+                words.append((w.start, w.end, t))
     return clean_words(words)
 
 
@@ -1068,10 +1079,58 @@ def frame_filter(framing, W, H):
 
 def enc_args(encoder):
     if encoder == "libx264":
-        v = ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-profile:v", "high"]
+        # "veryfast" encodes about twice as fast as "fast"; crf 17 instead of 18 keeps the picture as sharp
+        v = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "17", "-profile:v", "high"]
+    elif encoder == "h264_nvenc":  # NVIDIA: constant-quality mode, looks like crf ~18 at a fraction of the time
+        v = ["-c:v", encoder, "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "19", "-b:v", "0",
+             "-maxrate", "20M", "-bufsize", "30M", "-profile:v", "high"]
     else:
         v = ["-c:v", encoder, "-b:v", "12M", "-maxrate", "16M", "-bufsize", "24M"]
     return v + ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart"]
+
+
+HW_ENCODERS = (["h264_videotoolbox"] if sys.platform == "darwin" else ["h264_nvenc", "h264_qsv", "h264_amf"])
+AUTO_ENCODER = {"state": "unchecked", "encoder": "libx264", "note": ""}  # what "auto" picked, for the UI
+_auto_lock = threading.Lock()
+
+
+def _encoder_works(enc):
+    """Tries a 1-second vertical test encode (drivers that are too old or missing fail here, not mid-clip)."""
+    d = tempfile.mkdtemp(prefix="encchk_")
+    try:
+        r = subprocess.run([FFMPEG, "-y", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+                            "testsrc2=s=1080x1920:r=30:d=1"] + enc_args(enc)[:-10] +
+                           ["-pix_fmt", "yuv420p", os.path.join(d, "t.mp4")],
+                           capture_output=True, text=True, errors="replace", timeout=40, **popen_kw())
+        lines = (r.stderr or "").strip().splitlines()
+        why = next((l for l in lines if "driver" in l.lower() or "not available" in l.lower()
+                    or "cannot load" in l.lower()), lines[0] if lines else "")
+        return r.returncode == 0, [why.split("] ", 1)[-1]]
+    except Exception as e:
+        return False, [str(e)]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def pick_encoder(choice):
+    """'auto' -> the first hardware encoder (GPU) that really works on this PC, else libx264."""
+    if choice != "auto":
+        return choice
+    with _auto_lock:
+        if AUTO_ENCODER["state"] == "unchecked":
+            notes = []
+            for enc in HW_ENCODERS:
+                ok, err = _encoder_works(enc)
+                if ok:
+                    AUTO_ENCODER.update(state="checked", encoder=enc, note=f"using {enc} (graphics card)")
+                    break
+                notes.append(f"{enc}: {err[0][:120]}")
+            else:
+                hint = " - updating the graphics driver may enable it" if any("driver" in n.lower() for n in notes) else ""
+                AUTO_ENCODER.update(state="checked", encoder="libx264",
+                                    note=f"no working graphics-card encoder, using libx264 (CPU){hint}")
+            log("render", f"auto encoder: {AUTO_ENCODER['note']}" + (f" [{'; '.join(notes)}]" if notes else ""))
+        return AUTO_ENCODER["encoder"]
 
 
 def render(cfg, pieces, t0, t1, out, tmp):
@@ -1113,7 +1172,8 @@ def render(cfg, pieces, t0, t1, out, tmp):
         sh(base + ["-filter_complex", fc, "-map", "[out]", "-map", "0:a?"] + enc_args(enc) + [os.path.abspath(out)],
            cwd=tmp)
 
-    encs = [cfg.encoder] + (["libx264"] if cfg.encoder != "libx264" else [])
+    enc0 = pick_encoder(cfg.encoder)
+    encs = [enc0] + (["libx264"] if enc0 != "libx264" else [])
     variants = [(s, framing, e) for e in encs for s in ((2, 1, 0) if words else (0,))] + [(0, "fit", "libx264")]
     last = None
     for v in variants:
@@ -1138,7 +1198,37 @@ def thumbnail(mp4, at, png):
 
 # --------------------------------------------------------------------------- per-channel worker
 
-RENDER_SLOTS = threading.Semaphore(1)  # one clip renders at a time, so recording never starves for CPU
+class RenderSlots:
+    """How many clips render at the same time (Settings -> 'Clips rendered at the same time').
+    The limit is read live, so changing the setting takes effect for the next clip in the queue."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.busy = 0
+        self.waiting = 0
+
+    @contextlib.contextmanager
+    def take(self, cfg):
+        with self.cond:
+            self.waiting += 1
+            try:
+                while self.busy >= render_jobs(cfg):
+                    self.cond.wait(1)
+            finally:
+                self.waiting -= 1
+            self.busy += 1
+        try:
+            yield
+        finally:
+            with self.cond:
+                self.busy -= 1
+                self.cond.notify_all()
+
+    def status(self):
+        return dict(rendering=self.busy, queued=self.waiting)
+
+
+RENDER_SLOTS = RenderSlots()
 
 
 def safe_label(s):
@@ -1278,9 +1368,9 @@ class Worker(threading.Thread):
             got = min(t1, pieces[-1][0] + pieces[-1][1]) - max(t0, pieces[0][0])
             if got < (t1 - t0) - 2:
                 log(self.name, f"only {got:.0f}s of the {t1 - t0:.0f}s were recorded; making a shorter clip")
-            # 3) render (one at a time)
+            # 3) render (several at once, as many as the 'render_jobs' setting allows)
             tr["status"] = "queued"
-            with RENDER_SLOTS:
+            with RENDER_SLOTS.take(cfg):
                 tr["status"] = "rendering"
                 os.makedirs(cfg.out, exist_ok=True)
                 name = f"{safe_label(self.display) or self.name}_{time.strftime('%Y%m%d_%H%M%S', time.localtime(trig))}"

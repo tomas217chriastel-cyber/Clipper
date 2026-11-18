@@ -143,7 +143,9 @@ h4.sh{margin:24px 0 12px;font-size:12px;color:var(--acc2);text-transform:upperca
     <div><label>Cooldown between clips (sec)</label><input type="number" id="s_cooldown"></div>
     <div><label>Check who is live every (sec)</label><input type="number" id="s_poll" min="15" max="600"></div>
     <div><label>Stream quality (fallback list)</label><input type="text" id="s_quality"></div>
-    <div><label>Video encoder</label><select id="s_encoder"><option>libx264</option><option value="h264_nvenc">h264_nvenc (NVIDIA)</option><option value="h264_videotoolbox">h264_videotoolbox (Mac)</option><option value="h264_qsv">h264_qsv (Intel)</option><option value="h264_amf">h264_amf (AMD)</option></select></div>
+    <div><label>Clips rendered at the same time</label><select id="s_render_jobs"><option value="1">1 – lightest on the PC</option><option value="2">2 (recommended)</option><option value="3">3</option><option value="4">4 – fastest when many moments happen at once</option></select>
+      <div class="hint" id="rqhint">More at once = clips from busy moments are ready sooner, but the PC works harder.</div></div>
+    <div><label>Video encoder</label><select id="s_encoder"><option value="auto">Auto – graphics card if it works, else CPU (recommended)</option><option value="libx264">libx264 (CPU)</option><option value="h264_nvenc">h264_nvenc (NVIDIA)</option><option value="h264_videotoolbox">h264_videotoolbox (Mac)</option><option value="h264_qsv">h264_qsv (Intel)</option><option value="h264_amf">h264_amf (AMD)</option></select><div class="hint" id="enchint"></div></div>
     <div><label>Rolling buffer (sec)</label><input type="number" id="s_buffer"></div>
     <div class="full"><label>Extra hype words (comma separated)</label><input type="text" id="s_hype_words" placeholder="sheesh, cooked, aura"></div>
     <div class="full"><label>Save clips to</label><input type="text" id="s_out" placeholder="(default folder)"></div>
@@ -277,6 +279,10 @@ function renderState(s){
   else sub.textContent='';
   if(s.fonts&&!window.FONTS_LOADED){window.FONTS_LOADED=1;const st=document.createElement('style');
     st.textContent=Object.entries(s.fonts).map(([n,f])=>`@font-face{font-family:"AC ${n}";src:url(/fonts/${f}) format("truetype")}`).join('');document.head.appendChild(st)}
+  const ea=s.encoder_auto||{},rq=s.render_queue||{};
+  $('#enchint').textContent=ea.state==='checked'?'Auto: '+ea.note:'Auto checks your graphics card when the app starts.';
+  $('#rqhint').textContent='More at once = clips from busy moments are ready sooner, but the PC works harder.'+
+    (rq.rendering||rq.queued?`  Now: ${rq.rendering} rendering, ${rq.queued} waiting.`:'');
   window.OUT=s.out;window.ST=s;if(window.wasConn===false&&s.youtube.connected)toast('YouTube connected ✓');window.wasConn=s.youtube.connected;if(tab==='youtube')ytStat()}
 $('#add').onclick=async()=>{const u=$('#url').value.trim();if(!u)return;try{await api('channels',{url:u,label:$('#label').value});$('#url').value='';$('#label').value='';refresh()}catch(e){toast(e.message)}};
 $('#url').onkeydown=$('#label').onkeydown=e=>e.key==='Enter'&&$('#add').click();
@@ -318,7 +324,7 @@ function renderClips(list){lastClips=list;
 $('#hideDone').onchange=()=>lastClips?renderClips(lastClips):loadClips();
 
 /* settings */
-const F=['sensitivity','trigger','ent_threshold','use_audio','format','framing','pre','post','subs','model','cooldown','poll','quality','encoder','buffer','hype_words','out',
+const F=['sensitivity','trigger','ent_threshold','use_audio','format','framing','pre','post','subs','model','cooldown','poll','quality','encoder','render_jobs','buffer','hype_words','out',
   'sub_style','sub_font','sub_size','sub_position','sub_color','sub_highlight','sub_outline','sub_upper','sub_language'];
 const BOOL=new Set(['subs','use_audio','sub_upper']);
 const PALETTE=['#FFFFFF','#FFE600','#FFC400','#FF8A00','#FF3B30','#FF2D95','#E040FB','#8B5CF6','#3B82F6','#00C2FF','#00E5A8','#22C55E','#A3FF12','#9CA3AF','#111111','#000000'];

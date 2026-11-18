@@ -27,7 +27,7 @@ PRESETS = {
     "high": dict(ratio=2.2, min_users=3, min_score=8, min_hype_share=0.15),     # more clips
 }
 DEFAULTS = dict(out="", format="vertical", subs=True, model="small", pre=30, post=12, sensitivity="medium",
-                cooldown=60, quality="1080p60,1080p,720p60,720p,best", encoder="libx264", hype_words="", buffer=300,
+                cooldown=60, quality="1080p60,1080p,720p60,720p,best", encoder="auto", render_jobs=2, hype_words="", buffer=300,
                 window=8, baseline=120, sigma=3.0, hype_weight=2.0, poll=20,
                 trigger="both", ent_threshold=70, use_audio=True, framing="crop",
                 sub_style="karaoke", sub_font=ac.DEFAULT_FONT, sub_size="large", sub_position="lower",
@@ -35,7 +35,8 @@ DEFAULTS = dict(out="", format="vertical", subs=True, model="small", pre=30, pos
                 sub_language="auto",
                 yt_client_id="", yt_client_secret="", yt_description="", yt_tags="", yt_category="20", yt_privacy="private")
 LIMITS = dict(pre=(10, 90), post=(4, 45), cooldown=(15, 600), buffer=(120, 1800), window=(4, 20),
-              baseline=(60, 600), sigma=(1, 8), hype_weight=(0, 6), poll=(15, 600), ent_threshold=(30, 98))
+              baseline=(60, 600), sigma=(1, 8), hype_weight=(0, 6), poll=(15, 600), ent_threshold=(30, 98), render_jobs=(1, 4))
+CONFIG_VERSION = 2  # v2: the encoder default became "auto" (GPU when it works, else libx264)
 OLD_DEFAULTS = dict(quality="720p60,720p,best", poll=60)  # upgraded automatically (sharper source, faster live check)
 COLORS = ("sub_color", "sub_highlight", "sub_outline")
 CHOICES = dict(format=("vertical", "horizontal"), sensitivity=tuple(PRESETS),
@@ -43,7 +44,7 @@ CHOICES = dict(format=("vertical", "horizontal"), sensitivity=tuple(PRESETS),
                sub_size=tuple(ac.SUB_SIZES), sub_position=tuple(ac.SUB_POS),
                trigger=("hype", "entertainment", "both"),
                model=("tiny", "base", "small", "medium"),
-               encoder=("libx264", "h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_amf"),
+               encoder=("auto", "libx264", "h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_amf"),
                yt_privacy=("private", "unlisted", "public"),
                yt_category=("1", "10", "17", "20", "22", "23", "24", "25"))
 MASK = "\u2022\u2022\u2022\u2022\u2022\u2022"
@@ -91,17 +92,19 @@ class Engine:
             for k, old in OLD_DEFAULTS.items():
                 if self.settings.get(k) == old:
                     self.settings[k] = DEFAULTS[k]
+            if d.get("version", 1) < 2 and self.settings.get("encoder") == "libx264":
+                self.settings["encoder"] = "auto"  # the old default; "auto" still falls back to libx264
             self.channels = [c for c in d.get("channels", []) if "url" in c]
         except (OSError, ValueError):
             pass
 
     def save(self):
         with open(self.path, "w", encoding="utf8") as f:
-            json.dump(dict(settings=self.settings, channels=self.channels), f, indent=2)
+            json.dump(dict(version=CONFIG_VERSION, settings=self.settings, channels=self.channels), f, indent=2)
 
     def apply(self):
         s, c = self.settings, self.cfg
-        for k in ("format", "model", "pre", "post", "cooldown", "quality", "encoder", "buffer", "window",
+        for k in ("format", "model", "pre", "post", "cooldown", "quality", "encoder", "render_jobs", "buffer", "window",
                   "baseline", "sigma", "hype_weight", "poll", "trigger", "ent_threshold", "use_audio", "framing",
                   "sub_style", "sub_font", "sub_size", "sub_position", "sub_color", "sub_highlight", "sub_outline",
                   "sub_upper", "sub_language"):
@@ -116,7 +119,7 @@ class Engine:
 
     def set_settings(self, new):
         with self.lock:
-            old_model, old_subs = self.settings["model"], self.settings["subs"]
+            old_model, old_subs, old_jobs = self.settings["model"], self.settings["subs"], self.settings["render_jobs"]
             for k, v in new.items():
                 if k not in DEFAULTS or (k == "yt_client_secret" and str(v).startswith(MASK)):
                     continue
@@ -143,7 +146,8 @@ class Engine:
                 self.settings[k] = v
             self.save()
             self.apply()
-            if self.settings["subs"] and (not old_subs or old_model != self.settings["model"]):
+            if self.settings["subs"] and (not old_subs or old_model != self.settings["model"]
+                                          or old_jobs != self.settings["render_jobs"]):
                 ac.preload_model(self.cfg)
 
     # -- channels
@@ -159,6 +163,7 @@ class Engine:
                     self._start(c["url"], c.get("label", ""))
         if self.settings["subs"]:
             ac.preload_model(self.cfg)
+        threading.Thread(target=ac.pick_encoder, args=("auto",), daemon=True).start()  # test the GPU encoder early
 
     def _start(self, url, label=""):
         old = self.workers.get(url)
@@ -310,7 +315,8 @@ class Engine:
         yt = dict(configured=bool(self.settings["yt_client_id"] and self.settings["yt_client_secret"]),
                   connected=self.yt.connected())
         return dict(channels=chans, settings=shown, youtube=yt, out=self.cfg.out, model=ac.MODEL,
-                    ffmpeg=not ac.FFMPEG_NOTE, ffmpeg_note=ac.FFMPEG_NOTE,
+                    ffmpeg=not ac.FFMPEG_NOTE, ffmpeg_note=ac.FFMPEG_NOTE, encoder_auto=ac.AUTO_ENCODER,
+                    render_queue=ac.RENDER_SLOTS.status(),
                     fonts={k: v for k, v in ac.FONTS.items()})
 
     # -- clips
