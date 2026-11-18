@@ -1,8 +1,0 @@
-yt-dlp
-streamlink>=6.8
-pytchat
-websockets>=12
-curl_cffi
-faster-whisper
-imageio-ffmpeg
-pywebview; sys_platform != "linux"
