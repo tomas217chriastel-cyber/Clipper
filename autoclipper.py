@@ -470,18 +470,34 @@ def find_source(url, quality):
         pass
     try:
         import yt_dlp
-
+    except ImportError:
+        return None
+    # YouTube increasingly hides the video formats from its normal web client unless a JavaScript challenge
+    # is solved; the android_vr client still hands out the live HLS stream (up to 1080p) without it.
+    for clients in YT_CLIENTS:
         opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True,
                 "format": "best[height<=1080]/best"}
-        with yt_dlp.YoutubeDL(opts) as y:
-            info = y.extract_info(url, download=False)
-        if info and info.get("is_live"):
-            u = info.get("url") or (info.get("formats") or [{}])[-1].get("url")
-            if u:
-                return Source("hls", url=u, headers=info.get("http_headers"), vid=info.get("id"))
-    except Exception:
-        pass
+        if clients:
+            opts["extractor_args"] = {"youtube": {"player_client": clients}}
+        try:
+            with yt_dlp.YoutubeDL(opts) as y:
+                info = y.extract_info(url, download=False)
+        except Exception as e:
+            msg = str(e)
+            if "format is not available" in msg or "needs to be reloaded" in msg or "Sign in" in msg:
+                continue  # this client got no usable stream -> try the next one
+            return None  # offline / private / removed: no other client will help
+        if not (info and info.get("is_live")):
+            return None
+        u = info.get("url") or (info.get("formats") or [{}])[-1].get("url")
+        if u:
+            if clients:
+                log("source", f"using YouTube client {clients[0]} for {url}")
+            return Source("hls", url=u, headers=info.get("http_headers"), vid=info.get("id"))
     return None
+
+
+YT_CLIENTS = (None, ["android_vr"], ["ios", "android_vr"])
 
 
 def yt_video_id(url, src):
@@ -493,7 +509,7 @@ def yt_video_id(url, src):
     import yt_dlp
 
     with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as y:
-        return y.extract_info(url, download=False).get("id")
+        return y.extract_info(url, download=False, process=False).get("id")  # id only: no formats needed
 
 
 
@@ -890,6 +906,14 @@ def model_ref(name):
     return name  # faster-whisper downloads it on first use
 
 
+_FORCE_CPU = False  # set when the graphics card is found but its CUDA libraries (cuBLAS/cuDNN) are missing
+
+
+def _gpu_lib_error(e):
+    s = str(e).lower()
+    return any(k in s for k in ("cublas", "cudnn", "cuda", "libcudart"))
+
+
 def render_jobs(cfg):
     return max(1, min(4, int(getattr(cfg, "render_jobs", 1) or 1)))
 
@@ -905,7 +929,7 @@ def get_model(cfg):
             from faster_whisper import WhisperModel
 
             phys = max(1, (os.cpu_count() or 4) // 2)
-            _model = WhisperModel(model_ref(cfg.model), device="auto", compute_type="auto",
+            _model = WhisperModel(model_ref(cfg.model), device="cpu" if _FORCE_CPU else "auto", compute_type="auto",
                                   cpu_threads=max(2, phys // jobs), num_workers=jobs,
                                   download_root=os.path.join(data_dir(), "models"))
             _model_name = key
@@ -937,6 +961,20 @@ def clean_words(words):
 
 
 def transcribe(cfg, wav):
+    global _FORCE_CPU, _model
+    try:
+        return _transcribe(cfg, wav)
+    except Exception as e:
+        if _FORCE_CPU or not _gpu_lib_error(e):
+            raise
+        with _mlock:  # GPU found but unusable -> run Whisper on the CPU from now on
+            if not _FORCE_CPU:
+                _FORCE_CPU, _model = True, None
+                log("subs", f"graphics card can't run Whisper ({str(e)[:90]}); using the CPU for subtitles")
+        return _transcribe(cfg, wav)
+
+
+def _transcribe(cfg, wav):
     model = get_model(cfg)
     lang = getattr(cfg, "sub_language", "auto") or "auto"
     # no lock here: the model has a worker per render slot, so parallel clips transcribe in parallel
