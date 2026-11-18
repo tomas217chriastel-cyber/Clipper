@@ -98,7 +98,9 @@ h4.sh{margin:24px 0 12px;font-size:12px;color:var(--acc2);text-transform:upperca
 </section>
 
 <section id="t-clips" hidden>
-  <div class="row" style="margin-bottom:14px"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="hideDone"> Hide clips marked as uploaded</label><span class="sp"></span><span class="meta" id="clipinfo"></span></div>
+  <div class="row" style="margin-bottom:14px;flex-wrap:wrap"><label class="row" style="gap:6px;cursor:pointer"><input type="checkbox" id="hideDone"> Hide clips marked as uploaded</label>
+    <button class="ghost small" id="selAll">Select all not uploaded</button><button class="ghost small" id="selNone" hidden>Clear selection</button>
+    <button class="pri small" id="selUp" hidden>⇪ Upload selected</button><span class="sp"></span><span class="meta" id="clipinfo"></span></div>
   <div class="grid" id="clips"></div>
   <div class="empty" id="cempty" hidden>No clips yet. They appear here as soon as chat spikes on a live channel.</div>
 </section>
@@ -107,6 +109,9 @@ h4.sh{margin:24px 0 12px;font-size:12px;color:var(--acc2);text-transform:upperca
   <div class="card"><div class="form">
     <div><label>Sensitivity</label><select id="s_sensitivity"><option value="low">Low – only big moments</option><option value="medium">Medium (recommended)</option><option value="high">High – more clips</option></select>
       <div class="hint">How big a chat spike has to be before a clip is made.</div></div>
+    <div><label>Upload new clips automatically</label><select id="s_auto_upload"><option value="off">Off – I choose which clips to upload</option>
+      <option value="both">To YouTube + TikTok drafts</option><option value="youtube">To YouTube only</option><option value="tiktok">To TikTok drafts only</option></select>
+      <div class="hint">Uses your upload defaults (YouTube and TikTok tabs) and each clip's suggested title. Only clips made after you turn it on.</div></div>
     <div><label>Clip when…</label><select id="s_trigger"><option value="both">Hype spam OR entertainment meter (recommended)</option>
       <option value="hype">Only hype spam spikes (yellow graph)</option><option value="entertainment">Only entertainment meter (cyan graph)</option></select>
       <div class="hint">The entertainment meter (0–100) mixes chat speed, how many different people talk, reactions (CAPS, !!!, ???, emoji, LUL…) and how loud the stream suddenly gets.</div></div>
@@ -209,6 +214,21 @@ h4.sh{margin:24px 0 12px;font-size:12px;color:var(--acc2);text-transform:upperca
     <input type="datetime-local" id="u_at" hidden style="margin-top:8px"><div class="hint" id="u_hint"></div></div>
   <label class="row" style="cursor:pointer;color:var(--tx);font-size:13px"><input type="checkbox" id="u_shorts"> Add #Shorts (for vertical clips under 60 seconds)</label>
   <div class="row" style="margin-top:16px"><button class="pri" id="u_go">Add to upload queue</button><button class="ghost" id="u_x">Cancel</button></div></div></div>
+<div class="modal" id="bum"><div class="mbox"><h3 style="margin:0 0 12px" id="b_head">Upload</h3>
+  <div class="f" id="b_titlerow"><label>Title (YouTube title and first line of the TikTok caption, max 100)</label><input type="text" id="b_title" maxlength="100"></div>
+  <div class="hint" id="b_list" style="margin-bottom:10px"></div>
+  <div class="f"><label class="row" style="gap:6px;color:var(--tx)"><input type="checkbox" id="b_yt"> ▶ YouTube <span class="meta" id="b_ytnote"></span></label></div>
+  <div id="b_ytbox" style="margin:0 0 12px 22px">
+    <div class="form f"><div><label>Visibility</label><select id="b_privacy"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select></div>
+      <div><label>Tags (comma separated)</label><input type="text" id="b_tags"></div></div>
+    <div class="f"><label>Description</label><textarea id="b_desc" rows="3"></textarea></div>
+    <label class="row" style="gap:6px;font-size:13px"><input type="checkbox" id="b_shorts"> Add #Shorts</label></div>
+  <div class="f"><label class="row" style="gap:6px;color:var(--tx)"><input type="checkbox" id="b_tt"> ♪ TikTok – send to drafts <span class="meta" id="b_ttnote"></span></label></div>
+  <div id="b_ttbox" style="margin:0 0 12px 22px">
+    <div class="f"><label>Hashtags / text added to the caption</label><textarea id="b_caption" rows="2" placeholder="#fyp #gaming"></textarea></div>
+    <div class="hint">Each clip lands in your TikTok inbox; open the notification in the TikTok app to post it. For posting directly, use the ♪ TikTok button on a clip.</div></div>
+  <div class="hint" id="b_warn" style="color:var(--warn)"></div>
+  <div class="row" style="margin-top:16px"><button class="pri" id="b_go">Upload</button><button class="ghost" id="b_x">Cancel</button></div></div></div>
 <div class="modal" id="ttm"><div class="mbox"><h3 style="margin:0 0 6px">Send to TikTok</h3>
   <div class="meta" id="t_who" style="margin-bottom:12px"></div>
   <video id="t_prev" controls preload="metadata" style="width:100%;max-height:260px;background:#000;border-radius:8px;margin-bottom:12px"></video>
@@ -350,22 +370,54 @@ function renderClips(list){lastClips=list;
       const ex=why+(c.top_emotes||[]).map(x=>`<span class="chip">${esc(x)}</span>`).join('');
       const q=encodeURIComponent(c.name);
       el.innerHTML=`<video controls preload="none" poster="/clips/${q}.png" src="/clips/${q}.mp4"></video><div class="b">
+        <label class="row selbox" style="gap:6px;float:right;font-size:12px;color:var(--mut);cursor:pointer"><input type="checkbox" class="sel"> select</label>
         <div class="title"></div><div class="meta">${esc(c.label||c.channel)} · ${c.detected_at} · ${c.duration?c.duration+'s · ':''}${c.size_mb} MB</div>${ex}<canvas></canvas>
-        <div class="acts"><button class="ghost small cp">Copy title</button><button class="pri small yt">▶ YouTube</button><button class="pri small tt">♪ TikTok</button><button class="ghost small rv">Show file</button>
+        <div class="acts"><button class="ghost small cp">Copy title</button><button class="pri small yt">▶ YouTube</button><button class="pri small tt">♪ TikTok</button><button class="pri small both">⇪ Both</button><button class="ghost small rv">Show file</button>
         <label><input type="checkbox" class="up"> uploaded</label><span class="sp"></span><button class="danger small dl">Delete</button></div></div>`;
       el.querySelector('.title').textContent=c.suggested_title||c.name;
       el.querySelector('.cp').onclick=()=>navigator.clipboard.writeText(c.suggested_title||c.name).then(()=>toast('Title copied'));
       el.querySelector('.rv').onclick=()=>api('reveal',{name:c.name});el.querySelector('.yt').onclick=()=>openUp(c);el.querySelector('.tt').onclick=()=>openTT(c);
+      el.querySelector('.both').onclick=()=>openBulk([c]);
+      el.querySelector('.sel').checked=SEL.has(c.name);el.querySelector('.sel').onchange=e=>{e.target.checked?SEL.add(c.name):SEL.delete(c.name);selUI()};
       el.querySelector('.up').onchange=e=>{api('clips/mark',{name:c.name,uploaded:e.target.checked});el.classList.toggle('done',e.target.checked)};
       el.querySelector('.dl').onclick=()=>confirm('Delete this clip permanently?')&&api('clips/delete',{name:c.name}).then(loadClips);
       const s=c.series;if(s)requestAnimationFrame(()=>draw(el.querySelector('canvas'),s.score,s.hype,{marks:[[s.trig,c.reason||'hype']],band:[s.clip_start,s.clip_end],ent:s.ent}));
       root.insertBefore(el,prev?prev.nextSibling:root.firstChild)}
     el.querySelector('.up').checked=!!c.uploaded;el.classList.toggle('done',!!c.uploaded);
-    el.hidden=hide&&!!c.uploaded;prev=el}}
+    el.hidden=hide&&!!c.uploaded;prev=el}
+  for(const n of [...SEL])if(!keep.has(n))SEL.delete(n);selUI()}
 $('#hideDone').onchange=()=>lastClips?renderClips(lastClips):loadClips();
 
+/* upload several clips / both platforms at once */
+const SEL=new Set();let bulkClips=[];
+function selUI(){const n=SEL.size;$('#selUp').hidden=!n;$('#selNone').hidden=!n;$('#selUp').textContent=`⇪ Upload selected (${n})`;
+  document.querySelectorAll('#clips .clip').forEach(e=>{const s=e.querySelector('.sel');if(s)s.checked=SEL.has(e.dataset.n)})}
+$('#selAll').onclick=()=>{(lastClips||[]).filter(c=>!c.uploaded).forEach(c=>SEL.add(c.name));selUI()};
+$('#selNone').onclick=()=>{SEL.clear();selUI()};
+$('#selUp').onclick=()=>openBulk((lastClips||[]).filter(c=>SEL.has(c.name)));
+function openBulk(clips){if(!clips.length)return;if(!window.ST)return;bulkClips=clips;const s=window.ST.settings,yt=window.ST.youtube.connected,tt=window.ST.tiktok&&window.ST.tiktok.connected;
+  if(!yt&&!tt){toast('Connect YouTube or TikTok first');document.querySelector('[data-tab=youtube]').click();return}
+  const one=clips.length===1;$('#b_head').textContent=one?'Upload this clip':`Upload ${clips.length} clips`;
+  $('#b_titlerow').hidden=!one;$('#b_title').value=one?(clips[0].suggested_title||clips[0].name):'';
+  $('#b_list').innerHTML=one?'':'Titles: each clip uses its own suggested title.<br>'+clips.slice(0,8).map(c=>'• '+esc(c.suggested_title||c.name)).join('<br>')+(clips.length>8?`<br>… and ${clips.length-8} more`:'');
+  $('#b_yt').checked=yt;$('#b_yt').disabled=!yt;$('#b_ytnote').textContent=yt?'':'(connect in the YouTube tab first)';
+  $('#b_tt').checked=!!tt;$('#b_tt').disabled=!tt;$('#b_ttnote').textContent=tt?'':'(connect in the TikTok tab first)';
+  $('#b_privacy').value=s.yt_privacy;$('#b_desc').value=s.yt_description;$('#b_tags').value=s.yt_tags;$('#b_shorts').checked=s.format==='vertical';$('#b_caption').value=s.tt_caption||'';
+  bulkUI();$('#bum').classList.add('on')}
+function bulkUI(){const y=$('#b_yt').checked,t=$('#b_tt').checked;$('#b_ytbox').hidden=!y;$('#b_ttbox').hidden=!t;$('#b_go').disabled=!(y||t);
+  const n=bulkClips.length;$('#b_go').textContent=y&&t?`Upload to YouTube + TikTok`:y?'Upload to YouTube':'Send to TikTok drafts';
+  $('#b_warn').textContent=(t&&n>5?'TikTok allows 5 unfinished drafts per 24 h – the rest will fail until you post the first ones in the TikTok app. ':'')+
+    (y&&n>6?'Google\'s default YouTube API limit is about 6 uploads per day; extra ones fail with “limit reached” and can be retried tomorrow.':'')}
+['b_yt','b_tt'].forEach(i=>$('#'+i).onchange=bulkUI);
+$('#b_x').onclick=()=>$('#bum').classList.remove('on');
+$('#b_go').onclick=async()=>{const b={names:bulkClips.map(c=>c.name),youtube:$('#b_yt').checked,tiktok:$('#b_tt').checked,
+  privacy:$('#b_privacy').value,description:$('#b_desc').value,tags:$('#b_tags').value,shorts:$('#b_shorts').checked,caption:$('#b_caption').value};
+  if(bulkClips.length===1)b.title=$('#b_title').value;
+  try{const r=await api('uploads/many',b);$('#bum').classList.remove('on');SEL.clear();selUI();
+    toast(`${r.queued} upload(s) started`+(r.skipped.length?` · ${r.skipped.length} skipped (already queued or uploaded)`:''));loadUploads()}catch(e){toast(e.message)}};
+
 /* settings */
-const F=['sensitivity','trigger','ent_threshold','use_audio','format','framing','pre','post','subs','model','cooldown','poll','quality','encoder','render_jobs','buffer','hype_words','out',
+const F=['sensitivity','auto_upload','trigger','ent_threshold','use_audio','format','framing','pre','post','subs','model','cooldown','poll','quality','encoder','render_jobs','buffer','hype_words','out',
   'sub_style','sub_font','sub_size','sub_position','sub_color','sub_highlight','sub_outline','sub_upper','sub_language'];
 const BOOL=new Set(['subs','use_audio','sub_upper']);
 const PALETTE=['#FFFFFF','#FFE600','#FFC400','#FF8A00','#FF3B30','#FF2D95','#E040FB','#8B5CF6','#3B82F6','#00C2FF','#00E5A8','#22C55E','#A3FF12','#9CA3AF','#111111','#000000'];

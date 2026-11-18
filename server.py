@@ -35,7 +35,7 @@ DEFAULTS = dict(out="", format="vertical", subs=True, model="small", pre=30, pos
                 sub_color="#FFFFFF", sub_highlight="#FFE600", sub_outline="#000000", sub_upper=True,
                 sub_language="auto",
                 yt_client_id="", yt_client_secret="", yt_description="", yt_tags="", yt_category="20", yt_privacy="private",
-                tt_client_key="", tt_client_secret="", tt_mode="inbox", tt_caption="")
+                tt_client_key="", tt_client_secret="", tt_mode="inbox", tt_caption="", auto_upload="off")
 LIMITS = dict(pre=(10, 90), post=(4, 45), cooldown=(15, 600), buffer=(120, 1800), window=(4, 20),
               baseline=(60, 600), sigma=(1, 8), hype_weight=(0, 6), poll=(15, 600), ent_threshold=(30, 98), render_jobs=(1, 4))
 CONFIG_VERSION = 2  # v2: the encoder default became "auto" (GPU when it works, else libx264)
@@ -48,7 +48,7 @@ CHOICES = dict(format=("vertical", "horizontal"), sensitivity=tuple(PRESETS),
                model=("tiny", "base", "small", "medium"),
                encoder=("auto", "libx264", "h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_amf"),
                yt_privacy=("private", "unlisted", "public"),
-               tt_mode=("inbox", "direct"),
+               tt_mode=("inbox", "direct"), auto_upload=("off", "youtube", "tiktok", "both"),
                yt_category=("1", "10", "17", "20", "22", "23", "24", "25"))
 MASK = "\u2022\u2022\u2022\u2022\u2022\u2022"
 OPEN_OK = ("https://studio.youtube.com/", "https://youtu.be/", "https://www.youtube.com/",
@@ -92,7 +92,10 @@ class Engine:
         self.uploads = []
         self.uploads_path = os.path.join(self.dir, "uploads.json")
         self._load_uploads()
-        threading.Thread(target=self._upload_loop, daemon=True).start()
+        self._auto_since = time.time()  # auto-upload only clips made after this moment
+        for plat in ("youtube", "tiktok"):  # one worker per platform -> both upload at the same time
+            threading.Thread(target=self._upload_loop, args=(plat,), daemon=True).start()
+        threading.Thread(target=self._auto_loop, daemon=True).start()
 
     # -- persistence
     def _load(self):
@@ -417,10 +420,21 @@ class Engine:
             if u.get("status") == "uploading":
                 u["status"], u["progress"] = "queued", 0
 
+    def _uploads_copy(self):
+        # two upload workers update their items while this runs -> copy, retrying if an item changed mid-copy
+        for _ in range(5):
+            try:
+                with self.lock:
+                    return [dict(u) for u in self.uploads]
+            except RuntimeError:
+                time.sleep(0.01)
+        return [dict(u) for u in self.uploads]
+
     def _save_uploads(self):
+        data = self._uploads_copy()
         with self.lock:
             with open(self.uploads_path, "w", encoding="utf8") as f:
-                json.dump(self.uploads, f, ensure_ascii=False)
+                json.dump(data, f, ensure_ascii=False)
 
     def yt_connect(self, port):
         s = self.settings
@@ -622,23 +636,98 @@ class Engine:
         self._save_uploads()
 
     def list_uploads(self):
-        with self.lock:
-            return [{k: v for k, v in u.items() if k != "cancel"} for u in reversed(self.uploads)]
+        return [{k: v for k, v in u.items() if k not in ("cancel", "post_info")} for u in reversed(self._uploads_copy())]
 
     def open_url(self, url):
         if not url.startswith(OPEN_OK):
             raise ValueError("URL not allowed")
         webbrowser.open(url)
 
-    def _upload_loop(self):
+    # -- several clips / several platforms at once
+    def _clip_meta(self, name):
+        try:
+            with open(self._clip_path(name, ".json"), encoding="utf8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def queue_many(self, d):
+        """Queues each named clip for YouTube and/or TikTok (drafts) with the defaults (or the values given).
+        Returns how many uploads were queued and which ones were skipped and why."""
+        names = [str(n) for n in (d.get("names") or [])][:200]
+        to_yt, to_tt = bool(d.get("youtube")), bool(d.get("tiktok"))
+        if not names:
+            raise ValueError("Select at least one clip")
+        if not (to_yt or to_tt):
+            raise ValueError("Choose YouTube, TikTok or both")
+        if to_yt and not self.yt.connected():
+            raise ValueError("Connect your YouTube account first (YouTube tab)")
+        if to_tt and not self.tt.connected():
+            raise ValueError("Connect your TikTok account first (TikTok tab)")
+        s = self.settings
+        one_title = str(d.get("title") or "").strip() if len(names) == 1 else ""
+        queued, skipped = 0, []
+        for name in names:
+            m = self._clip_meta(name)
+            title = (one_title or m.get("suggested_title") or m.get("label") or name).strip()[:100]
+            if to_yt:
+                try:
+                    self.enqueue_upload(dict(name=name, title=title, description=d.get("description", s["yt_description"]),
+                                             tags=d.get("tags", s["yt_tags"]), privacy=d.get("privacy", s["yt_privacy"]),
+                                             category=s["yt_category"], shorts=d.get("shorts", s["format"] == "vertical")))
+                    queued += 1
+                except (ValueError, OSError) as e:
+                    skipped.append(f"YouTube · {name}: {e}")
+            if to_tt:
+                extra = d.get("caption", s["tt_caption"]) or ""
+                try:
+                    self.enqueue_tiktok(dict(name=name, mode="inbox", caption="\n\n".join(x for x in (title, extra.strip()) if x)))
+                    queued += 1
+                except (ValueError, OSError) as e:
+                    skipped.append(f"TikTok · {name}: {e}")
+        return dict(queued=queued, skipped=skipped)
+
+    def _auto_loop(self):
+        """Settings 'Upload new clips automatically': queues every new clip as soon as it is saved."""
+        last_mode = self.settings.get("auto_upload", "off")
+        while True:
+            time.sleep(5)
+            mode = self.settings.get("auto_upload", "off")
+            if mode != last_mode:
+                self._auto_since = time.time()  # switching it on never uploads the old clips
+                last_mode = mode
+            if mode == "off":
+                continue
+            try:
+                for c in self.list_clips():
+                    if c.get("auto_queued") or float(c.get("detected_ts") or 0) < self._auto_since:
+                        continue
+                    want_yt = mode in ("youtube", "both") and self.yt.connected()
+                    want_tt = mode in ("tiktok", "both") and self.tt.connected()
+                    if want_yt or want_tt:
+                        r = self.queue_many(dict(names=[c["name"]], youtube=want_yt, tiktok=want_tt))
+                        ac.log("upload", f"auto-upload {c['name']}: {r['queued']} queued"
+                               + (f", skipped: {'; '.join(r['skipped'])}" if r["skipped"] else ""))
+                    else:
+                        ac.log("upload", f"auto-upload {c['name']} skipped: connect YouTube/TikTok first")
+                    m = self._clip_meta(c["name"])
+                    m["auto_queued"] = True
+                    with open(self._clip_path(c["name"], ".json"), "w", encoding="utf8") as f:
+                        json.dump(m, f, ensure_ascii=False)
+            except Exception as e:
+                ac.log("upload", f"auto-upload check failed: {e}")
+
+    def _upload_loop(self, platform):
         while True:
             time.sleep(2)
-            try:
-                self._tiktok_poll()
-            except Exception as e:
-                ac.log("tiktok", f"status check failed: {e}")
+            if platform == "tiktok":
+                try:
+                    self._tiktok_poll()
+                except Exception as e:
+                    ac.log("tiktok", f"status check failed: {e}")
             with self.lock:
-                item = next((u for u in self.uploads if u["status"] == "queued"), None)
+                item = next((u for u in self.uploads if u["status"] == "queued"
+                             and u.get("platform", "youtube") == platform), None)
                 if item:
                     item["status"], item["progress"] = "uploading", 0
             if not item:
@@ -786,6 +875,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 e.tt_disconnect()
             elif p == "/api/tiktok/uploads":
                 e.enqueue_tiktok(d)
+            elif p == "/api/uploads/many":
+                return self._json(dict(ok=True, **e.queue_many(d)))
             elif p == "/api/uploads":
                 e.enqueue_upload(d)
             elif p == "/api/uploads/cancel":
